@@ -237,6 +237,36 @@ import Foundation
     #expect(await queue.next() == nil)
 }
 
+@Test func partialTranslationQueueCoalescesAnInFlightBurst() async {
+    let queue = PartialTranslationQueue()
+    await queue.submit(testTranslationRequest(start: 0, text: "early prefix"))
+    let initial = await queue.next()
+    await queue.submit(testTranslationRequest(start: 0, text: "newest useful prefix"))
+
+    guard let initial else {
+        Issue.record("Expected an initial translation request")
+        return
+    }
+    let request = await queue.coalesced(with: initial)
+
+    #expect(request?.sourceText == "newest useful prefix")
+}
+
+@Test func partialTranslationQueueDoesNotTranslateAfterFinal() async {
+    let queue = PartialTranslationQueue()
+    await queue.submit(testTranslationRequest(start: 42, text: "unfinished"))
+    let inFlight = await queue.next()
+    await queue.discard(segmentStartingAt: 42)
+
+    guard let inFlight else {
+        Issue.record("Expected an in-flight translation request")
+        return
+    }
+    let request = await queue.coalesced(with: inFlight)
+
+    #expect(request == nil)
+}
+
 private func testSegment(start: Int64, count: Int) -> SpeechSegment {
     SpeechSegment(
         samples: Array(repeating: 0, count: count),

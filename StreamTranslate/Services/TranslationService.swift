@@ -1,5 +1,16 @@
 import Translation
 
+struct IdentifiedTranslationRequest: Sendable {
+    let id: UUID
+    let text: String
+}
+
+struct IdentifiedTranslationResponse: Sendable {
+    let id: UUID
+    let sourceText: String
+    let translatedText: String
+}
+
 final class TranslationService: @unchecked Sendable {
     private var sessions: [TranslationDirection: TranslationSession] = [:]
 
@@ -38,6 +49,36 @@ final class TranslationService: @unchecked Sendable {
         }
         let response = try await session.translate(text)
         return response.targetText
+    }
+
+    func translateBatch(
+        _ requests: [IdentifiedTranslationRequest],
+        direction: TranslationDirection,
+        onResponse: @escaping @Sendable (IdentifiedTranslationResponse) async -> Void
+    ) async throws {
+        guard let session = sessions[direction] else {
+            throw TranslationServiceError.sessionNotReady
+        }
+        let identifiers = Dictionary(
+            uniqueKeysWithValues: requests.map { ($0.id.uuidString, $0.id) }
+        )
+        let batch = requests.map {
+            TranslationSession.Request(
+                sourceText: $0.text,
+                clientIdentifier: $0.id.uuidString
+            )
+        }
+        for try await response in session.translate(batch: batch) {
+            guard let rawID = response.clientIdentifier,
+                  let id = identifiers[rawID] else { continue }
+            await onResponse(
+                IdentifiedTranslationResponse(
+                    id: id,
+                    sourceText: response.sourceText,
+                    translatedText: response.targetText
+                )
+            )
+        }
     }
 }
 

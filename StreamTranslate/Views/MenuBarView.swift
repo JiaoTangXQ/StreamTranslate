@@ -36,7 +36,8 @@ struct MenuBarView: View {
                     || (viewModel.isLoading && !viewModel.isModelReady)
             )
 
-            if settings.audioInputSource == .microphone {
+            if settings.audioInputSource == .microphone,
+               settings.selectedModel.backend == .whisperKit {
                 HStack {
                     Text("Sensitivity")
                         .font(.system(size: 12))

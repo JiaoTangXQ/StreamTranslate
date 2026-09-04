@@ -92,6 +92,35 @@ struct CaptionTextStabilizer: Sendable {
         tokens(in: text).count
     }
 
+    /// Returns text that is safe enough to translate before it has met the
+    /// stricter two-observation requirement used for the visible frozen
+    /// prefix. The live edge stays excluded because streaming recognizers are
+    /// most likely to revise their last few words.
+    func conservativeTranslationPrefix(
+        in text: String,
+        language: SpokenLanguage
+    ) -> String {
+        let stable = committedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let tokens = Self.tokens(in: text)
+        guard !tokens.isEmpty else { return stable }
+        guard committedKeys.elementsEqual(
+            tokens.prefix(committedKeys.count).map(\.key)
+        ) else { return stable }
+
+        let editableUnitCount = language == .chinese ? 4 : 2
+        let candidateCount = max(
+            committedTokenCount,
+            tokens.count - editableUnitCount
+        )
+        guard candidateCount > 0 else { return stable }
+
+        let end = tokens[candidateCount - 1].range.upperBound
+        let candidate = String(text[..<end])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard stable.isEmpty || candidate.hasPrefix(stable) else { return stable }
+        return candidate
+    }
+
     private mutating func reset(for segmentStartSample: Int64) {
         reset()
         self.segmentStartSample = segmentStartSample
@@ -266,8 +295,11 @@ enum PartialTranslationPolicy {
         let endsPhrase = stable.last.map {
             ".!?。！？;；:：".contains($0)
         } ?? false
+        let rewritesRequestedPrefix = !previousText.isEmpty
+            && !stable.hasPrefix(previousText)
 
         return previousText.isEmpty
+            || rewritesRequestedPrefix
             || currentCount - previousCount >= requiredGrowth
             || endsPhrase
     }

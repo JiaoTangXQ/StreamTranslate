@@ -29,7 +29,8 @@ struct SettingsView: View {
                         .foregroundStyle(.orange)
                 }
 
-                if settings.audioInputSource == .microphone {
+                if settings.audioInputSource == .microphone,
+                   settings.selectedModel.backend == .whisperKit {
                     Picker(
                         "Speech Detection Sensitivity",
                         selection: $settings.speechDetectionSensitivity
@@ -49,6 +50,10 @@ struct SettingsView: View {
                             .font(.caption)
                             .foregroundStyle(.orange)
                     }
+                } else if settings.audioInputSource == .microphone {
+                    Text("Apple Speech receives a continuous stream and determines phrase boundaries itself; the sensitivity setting is not used.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
 
@@ -75,7 +80,7 @@ struct SettingsView: View {
                     .disabled(viewModel.isRecording || viewModel.isStartingCapture)
                 }
 
-                Text("Comma-separated names and technical terms help Whisper preserve domain-specific wording.")
+                Text("Comma-separated names and technical terms are supplied to the selected recognizer as context.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 

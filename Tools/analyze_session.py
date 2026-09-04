@@ -37,6 +37,8 @@ def percentile(values: list[float], fraction: float) -> float | None:
 def summary(values: list[float]) -> dict[str, float | int | None]:
     return {
         "count": len(values),
+        "first_ms": round(values[0], 1) if values else None,
+        "min_ms": round(min(values), 1) if values else None,
         "p50_ms": round(percentile(values, 0.50), 1) if values else None,
         "p95_ms": round(percentile(values, 0.95), 1) if values else None,
         "max_ms": round(max(values), 1) if values else None,

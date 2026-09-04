@@ -8,6 +8,25 @@ import Foundation
     #expect(a.id != b.id)
 }
 
+@Test func captionEntryCanPreserveIdWhenTranslationArrives() {
+    let id = UUID()
+    let source = CaptionEntry(
+        id: id,
+        timestamp: .now,
+        englishText: "Hello",
+        chineseText: ""
+    )
+    let translated = CaptionEntry(
+        id: id,
+        timestamp: source.timestamp,
+        englishText: source.englishText,
+        chineseText: "你好"
+    )
+
+    #expect(translated.id == source.id)
+    #expect(translated.chineseText == "你好")
+}
+
 @Test func captionEntryStoresTexts() {
     let entry = CaptionEntry(timestamp: .now, englishText: "Hello world", chineseText: "你好世界")
     #expect(entry.englishText == "Hello world")

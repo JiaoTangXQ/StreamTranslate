@@ -65,13 +65,26 @@ struct PartialTranslationRequest: Sendable {
     let generation: Int
 }
 
+private struct FinalTranslationRequest: Sendable {
+    let entryID: UUID
+    let segment: SpeechSegment
+    let output: TranscriptionOutput
+    let sourceText: String
+    let direction: TranslationDirection
+    let generation: Int
+    let queuedAt: Date
+    let logger: MeetingSessionLogger?
+}
+
 actor PartialTranslationQueue {
     private var latest: PartialTranslationRequest?
     private var waiter: CheckedContinuation<PartialTranslationRequest?, Never>?
+    private var discardedSegmentStarts: Set<Int64> = []
     private var isFinished = false
 
     func submit(_ request: PartialTranslationRequest) {
-        guard !isFinished else { return }
+        guard !isFinished,
+              !discardedSegmentStarts.contains(request.segment.startSample) else { return }
         if let waiter {
             self.waiter = nil
             waiter.resume(returning: request)
@@ -93,7 +106,20 @@ actor PartialTranslationQueue {
         }
     }
 
+    /// Apple Speech can emit several growing subword hypotheses in one
+    /// callback burst. After a short debounce, consume the newest request so
+    /// only the most useful prefix reaches TranslationSession.
+    func coalesced(with request: PartialTranslationRequest) -> PartialTranslationRequest? {
+        guard !discardedSegmentStarts.contains(request.segment.startSample) else {
+            return nil
+        }
+        guard let latest else { return request }
+        self.latest = nil
+        return latest
+    }
+
     func discard(segmentStartingAt startSample: Int64) {
+        discardedSegmentStarts.insert(startSample)
         if latest?.segment.startSample == startSample {
             latest = nil
         }
@@ -191,7 +217,9 @@ final class CaptionViewModel {
     private var partialTranslationTask: Task<Void, Never>?
     private var activePartialTranslationOperation: Task<Void, Never>?
     private var partialTranslationQueue: PartialTranslationQueue?
-    private var finalTranslationTasks: [UUID: Task<Void, Never>] = [:]
+    private var pendingFinalTranslations: [FinalTranslationRequest] = []
+    private var finalTranslationWorker: Task<Void, Never>?
+    private var finalTranslationWorkerID: UUID?
     private var cleanupTask: Task<Void, Never>?
     private var readyTranslationDirections: Set<TranslationDirection> = []
     private var transcriptionContext = TranscriptionContext()
@@ -339,8 +367,10 @@ final class CaptionViewModel {
         captionGeneration += 1
         activePartialTranslationOperation?.cancel()
         activePartialTranslationOperation = nil
-        finalTranslationTasks.values.forEach { $0.cancel() }
-        finalTranslationTasks = [:]
+        finalTranslationWorker?.cancel()
+        finalTranslationWorker = nil
+        finalTranslationWorkerID = nil
+        pendingFinalTranslations = []
         captionHistory = []
         recentCaptions = []
         clearStreamingState()
@@ -527,8 +557,13 @@ final class CaptionViewModel {
         )
         partialTranslationTask = Task { [weak self] in
             while !Task.isCancelled,
-                  let request = await translationQueue.next(),
+                  let initialRequest = await translationQueue.next(),
                   let self {
+                try? await Task.sleep(for: .milliseconds(30))
+                guard !Task.isCancelled,
+                      let request = await translationQueue.coalesced(
+                        with: initialRequest
+                      ) else { continue }
                 let operation = Task { [weak self] in
                     guard let self else { return }
                     await self.processPartialTranslation(request, logger: logger)
@@ -590,8 +625,13 @@ final class CaptionViewModel {
 
         partialTranslationTask = Task { [weak self] in
             while !Task.isCancelled,
-                  let request = await translationQueue.next(),
+                  let initialRequest = await translationQueue.next(),
                   let self {
+                try? await Task.sleep(for: .milliseconds(30))
+                guard !Task.isCancelled,
+                      let request = await translationQueue.coalesced(
+                        with: initialRequest
+                      ) else { continue }
                 let operation = Task { [weak self] in
                     guard let self else { return }
                     await self.processPartialTranslation(request, logger: logger)
@@ -750,18 +790,27 @@ final class CaptionViewModel {
         direction: TranslationDirection,
         partialTranslations: PartialTranslationQueue
     ) async {
-        let stableText = showStreamingPartial(output, segment: segment)
+        let presentation = showStreamingPartial(output, segment: segment)
+        let conservativePrefix = captionTextStabilizer.conservativeTranslationPrefix(
+            in: output.text,
+            language: output.language
+        )
+        let sourceText = CaptionTextStabilizer.semanticUnitCount(
+            in: conservativePrefix
+        ) > CaptionTextStabilizer.semanticUnitCount(in: presentation.stable)
+            ? conservativePrefix
+            : presentation.stable
         if PartialTranslationPolicy.shouldRequest(
             previousText: lastPartialTranslationRequestText,
-            stableText: stableText,
+            stableText: sourceText,
             language: output.language
         ) {
-            lastPartialTranslationRequestText = stableText
+            lastPartialTranslationRequestText = sourceText
             await partialTranslations.submit(
                 PartialTranslationRequest(
                     segment: segment,
                     output: output,
-                    sourceText: stableText,
+                    sourceText: sourceText,
                     direction: direction,
                     generation: captionGeneration
                 )
@@ -801,7 +850,8 @@ final class CaptionViewModel {
         guard request.generation == captionGeneration,
               streamingSegmentStartSample == request.segment.startSample,
               lastPartialTranslationRequestText == request.sourceText,
-              streamingStableOriginal.hasPrefix(request.sourceText) else { return }
+              (streamingStableOriginal + streamingDraftOriginal)
+                .hasPrefix(request.sourceText) else { return }
         showStreamingTranslation(
             translation.text,
             sourceLanguage: request.output.language
@@ -910,53 +960,132 @@ final class CaptionViewModel {
             duration: 0
         )
 
-        let generation = captionGeneration
-        let entryID = entry.id
-        let task = Task { [weak self] in
-            guard let self else { return }
-            defer { self.finalTranslationTasks[entryID] = nil }
-            guard !Task.isCancelled else { return }
+        enqueueFinalTranslation(
+            FinalTranslationRequest(
+                entryID: entry.id,
+                segment: segment,
+                output: output,
+                sourceText: finalText,
+                direction: direction,
+                generation: captionGeneration,
+                queuedAt: .now,
+                logger: logger
+            )
+        )
+    }
 
-            let translationStarted = Date()
-            let translation = await self.translate(finalText, direction: direction)
-            guard !Task.isCancelled,
-                  self.captionGeneration == generation else { return }
+    private func enqueueFinalTranslation(_ request: FinalTranslationRequest) {
+        pendingFinalTranslations.append(request)
+        guard finalTranslationWorker == nil else { return }
+        let workerID = UUID()
+        finalTranslationWorkerID = workerID
+        finalTranslationWorker = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(25))
+            while !Task.isCancelled, let self {
+                await self.translationGate.acquire()
+                if Task.isCancelled {
+                    await self.translationGate.release()
+                    break
+                }
+                guard let batch = self.takeNextFinalTranslationBatch() else {
+                    await self.translationGate.release()
+                    break
+                }
+                await self.processFinalTranslationBatch(batch)
+                await self.translationGate.release()
+            }
+            guard self?.finalTranslationWorkerID == workerID else { return }
+            self?.finalTranslationWorker = nil
+            self?.finalTranslationWorkerID = nil
+        }
+    }
 
-            if let error = translation.error {
-                logger?.recordPipelineError(
+    private func takeNextFinalTranslationBatch() -> [FinalTranslationRequest]? {
+        pendingFinalTranslations.removeAll {
+            $0.generation != captionGeneration
+        }
+        guard let direction = pendingFinalTranslations.first?.direction else {
+            return nil
+        }
+        let batch = pendingFinalTranslations.filter { $0.direction == direction }
+        pendingFinalTranslations.removeAll { $0.direction == direction }
+        return batch
+    }
+
+    private func processFinalTranslationBatch(
+        _ batch: [FinalTranslationRequest]
+    ) async {
+        guard let direction = batch.first?.direction else { return }
+        let byID = Dictionary(uniqueKeysWithValues: batch.map { ($0.entryID, $0) })
+        do {
+            try await translationService.translateBatch(
+                batch.map {
+                    IdentifiedTranslationRequest(id: $0.entryID, text: $0.sourceText)
+                },
+                direction: direction,
+                onResponse: { [weak self] response in
+                    await MainActor.run {
+                        guard let self,
+                              let request = byID[response.id],
+                              request.generation == self.captionGeneration else { return }
+                        self.applyFinalTranslation(
+                            response.translatedText,
+                            to: request,
+                            duration: Date().timeIntervalSince(request.queuedAt)
+                        )
+                    }
+                }
+            )
+        } catch is CancellationError {
+            return
+        } catch {
+            let details = Self.describe(error)
+            statusMessage = "Translation error: \(error.localizedDescription)"
+            AppLogger.log("Final translation batch failed: \(details)")
+            for request in batch where request.generation == captionGeneration {
+                request.logger?.recordPipelineError(
                     "final_translation_failed",
-                    segment: segment,
-                    error: error
+                    segment: request.segment,
+                    error: details
                 )
             }
-            logger?.recordTranslation(
-                "final_translated",
-                segment: segment,
-                sourceText: finalText,
-                translatedText: translation.text,
-                direction: direction,
-                duration: Date().timeIntervalSince(translationStarted)
-            )
-
-            let english = output.language == .english ? finalText : translation.text
-            let chinese = output.language == .chinese ? finalText : translation.text
-            AppLogger.log("Translated \(direction): \(translation.text)")
-            self.updateCaption(
-                id: entryID,
-                english: english,
-                chinese: chinese,
-                sourceLanguage: output.language
-            )
-            logger?.recordTranslation(
-                "caption_committed",
-                segment: segment,
-                sourceText: finalText,
-                translatedText: translation.text,
-                direction: direction,
-                duration: 0
-            )
         }
-        finalTranslationTasks[entryID] = task
+    }
+
+    private func applyFinalTranslation(
+        _ translatedText: String,
+        to request: FinalTranslationRequest,
+        duration: TimeInterval
+    ) {
+        request.logger?.recordTranslation(
+            "final_translated",
+            segment: request.segment,
+            sourceText: request.sourceText,
+            translatedText: translatedText,
+            direction: request.direction,
+            duration: duration
+        )
+        let english = request.output.language == .english
+            ? request.sourceText
+            : translatedText
+        let chinese = request.output.language == .chinese
+            ? request.sourceText
+            : translatedText
+        updateCaption(
+            id: request.entryID,
+            english: english,
+            chinese: chinese,
+            sourceLanguage: request.output.language
+        )
+        request.logger?.recordTranslation(
+            "caption_committed",
+            segment: request.segment,
+            sourceText: request.sourceText,
+            translatedText: translatedText,
+            direction: request.direction,
+            duration: 0
+        )
+        AppLogger.log("Translated \(request.direction): \(translatedText)")
     }
 
     private func recognizePartial(
@@ -1134,7 +1263,7 @@ final class CaptionViewModel {
     private func showStreamingPartial(
         _ output: TranscriptionOutput,
         segment: SpeechSegment
-    ) -> String {
+    ) -> StabilizedCaptionText {
         let isNewSegment = streamingSegmentStartSample != segment.startSample
         let sourceLanguageChanged = streamingSourceLanguage != output.language
         if isNewSegment || sourceLanguageChanged {
@@ -1165,7 +1294,7 @@ final class CaptionViewModel {
         case .unknown:
             clearStreamingState()
         }
-        return presentation.stable
+        return presentation
     }
 
     private func showStreamingFinal(

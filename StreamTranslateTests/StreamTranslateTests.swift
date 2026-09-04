@@ -145,3 +145,26 @@ import Foundation
     #expect(health.checkForCallbackStall(at: 13) == .callbackStall)
     #expect(health.checkForCallbackStall(at: 20) == nil)
 }
+
+@Test func activeMicrophoneCallbacksDoNotRequestRecovery() {
+    var health = MicrophoneCaptureHealth()
+    health.reset(at: 0)
+
+    for index in 1...1_000 {
+        let time = Double(index) * 0.02
+        health.observeCallback(at: time)
+        #expect(health.checkForCallbackStall(at: time) == nil)
+    }
+}
+
+@Test func stalledMicrophoneCallbacksRequestOneRecoveryUntilReset() {
+    var health = MicrophoneCaptureHealth()
+    health.reset(at: 10)
+
+    #expect(health.checkForCallbackStall(at: 12.9) == nil)
+    #expect(health.checkForCallbackStall(at: 13) == .callbackStall)
+    #expect(health.checkForCallbackStall(at: 20) == nil)
+
+    health.allowRecoveryRetry(at: 20)
+    #expect(health.checkForCallbackStall(at: 23) == .callbackStall)
+}

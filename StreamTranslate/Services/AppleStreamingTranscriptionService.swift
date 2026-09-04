@@ -71,7 +71,7 @@ final class AppleStreamingTranscriptionService: @unchecked Sendable {
                         modules: modules,
                         options: .init(
                             priority: .userInitiated,
-                            modelRetention: .processLifetime
+                            modelRetention: .whileInUse
                         )
                     )
                     try await analyzer.setContext(context)

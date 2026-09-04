@@ -1,6 +1,55 @@
 import Testing
 @testable import StreamTranslate
 
+@Test func conservativeEnglishTranslationPrefixKeepsTwoEditableWords() {
+    var stabilizer = CaptionTextStabilizer()
+    let text = "Today we are testing continuous English speech"
+
+    _ = stabilizer.update(
+        text: text,
+        segmentStartSample: 0,
+        language: .english,
+        evidenceEndSample: 16_000
+    )
+
+    #expect(
+        stabilizer.conservativeTranslationPrefix(in: text, language: .english)
+            == "Today we are testing continuous"
+    )
+}
+
+@Test func conservativeTranslationPrefixNeverDropsFrozenText() {
+    var stabilizer = CaptionTextStabilizer()
+    _ = stabilizer.update(
+        text: "We can now safely ship this release",
+        segmentStartSample: 0,
+        language: .english,
+        evidenceEndSample: 16_000
+    )
+    let presentation = stabilizer.update(
+        text: "We can now safely ship this release today",
+        segmentStartSample: 0,
+        language: .english,
+        evidenceEndSample: 32_000
+    )
+
+    let prefix = stabilizer.conservativeTranslationPrefix(
+        in: "A completely rewritten live hypothesis",
+        language: .english
+    )
+
+    #expect(!presentation.stable.isEmpty)
+    #expect(prefix == presentation.stable)
+}
+
+@Test func partialTranslationPolicyReplacesARewrittenEarlyPrefix() {
+    #expect(PartialTranslationPolicy.shouldRequest(
+        previousText: "Today we test the old",
+        stableText: "Today we test a revised",
+        language: .english
+    ))
+}
+
 @Test func firstSnapshotRemainsDraft() {
     var stabilizer = CaptionTextStabilizer()
     let value = stabilizer.update(

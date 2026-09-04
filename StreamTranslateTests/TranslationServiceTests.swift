@@ -13,6 +13,22 @@ import Foundation
     }
 }
 
+@Test @MainActor func translationBatchThrowsWithoutSession() async {
+    let service = TranslationService()
+    do {
+        try await service.translateBatch(
+            [IdentifiedTranslationRequest(id: UUID(), text: "Hello")],
+            direction: .englishToChinese,
+            onResponse: { _ in }
+        )
+        Issue.record("Expected TranslationServiceError.sessionNotReady")
+    } catch let error as TranslationServiceError {
+        #expect(error == .sessionNotReady)
+    } catch {
+        Issue.record("Unexpected error: \(error)")
+    }
+}
+
 @Test @MainActor func translationServiceConfigurationSimplifiedChinese() {
     let service = TranslationService()
     let config = service.configuration(

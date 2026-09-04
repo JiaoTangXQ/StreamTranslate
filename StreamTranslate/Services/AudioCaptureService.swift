@@ -11,6 +11,41 @@ enum SystemAudioCaptureActivity: Sendable {
     case screen
 }
 
+enum MicrophoneCaptureRecoveryReason: String, Equatable, Sendable {
+    case callbackStall = "microphone callback stall"
+}
+
+struct MicrophoneCaptureHealth: Sendable {
+    private static let callbackStallDelay: TimeInterval = 3
+
+    private var lastCallbackAt: TimeInterval?
+    private var recoveryRequested = false
+
+    mutating func reset(at time: TimeInterval) {
+        lastCallbackAt = time
+        recoveryRequested = false
+    }
+
+    mutating func observeCallback(at time: TimeInterval) {
+        lastCallbackAt = time
+    }
+
+    mutating func checkForCallbackStall(
+        at time: TimeInterval
+    ) -> MicrophoneCaptureRecoveryReason? {
+        guard !recoveryRequested,
+              let lastCallbackAt,
+              time - lastCallbackAt >= Self.callbackStallDelay else { return nil }
+        recoveryRequested = true
+        return .callbackStall
+    }
+
+    mutating func allowRecoveryRetry(at time: TimeInterval) {
+        lastCallbackAt = time
+        recoveryRequested = false
+    }
+}
+
 /// Treats the ScreenCaptureKit stream as alive while either its screen or
 /// audio output is producing callbacks. Audio silence alone is not evidence
 /// that capture has failed.
@@ -65,6 +100,7 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
     private let sessionLogger: MeetingSessionLogger?
     private let sequenceLock = NSLock()
     private let systemAudioLock = NSLock()
+    private let microphoneLock = NSLock()
     private var screenStream: SCStream?
     private var systemAudioHealth = SystemAudioCaptureHealth()
     private var systemAudioWatchdog: Task<Void, Never>?
@@ -72,7 +108,10 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
     private var isRestartingSystemAudio = false
     private var displaySleepActivity: NSObjectProtocol?
     private var audioEngine: AVAudioEngine?
-    private var audioConverter: AVAudioConverter?
+    private var microphoneHealth = MicrophoneCaptureHealth()
+    private var microphoneWatchdog: Task<Void, Never>?
+    private var isStoppingMicrophone = false
+    private var isRestartingMicrophone = false
     private var continuation: AsyncStream<CapturedAudioChunk>.Continuation?
     private var _audioStream: AsyncStream<CapturedAudioChunk>?
     private var nextSequence: Int64 = 0
@@ -251,6 +290,15 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
             throw AudioCaptureError.microphonePermissionDenied
         }
 
+        microphoneLock.withLock {
+            isStoppingMicrophone = false
+            isRestartingMicrophone = false
+        }
+        try installMicrophoneCapture()
+        startMicrophoneWatchdog()
+    }
+
+    private func installMicrophoneCapture() throws {
         let engine = AVAudioEngine()
         let inputNode = engine.inputNode
         let inputFormat = inputNode.outputFormat(forBus: 0)
@@ -266,14 +314,12 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
             throw AudioCaptureError.audioConversionUnavailable
         }
 
-        audioEngine = engine
-        audioConverter = converter
-
         inputNode.installTap(
             onBus: 0,
             bufferSize: 4_096,
             format: inputFormat
         ) { [weak self] buffer, time in
+            self?.recordMicrophoneCallback()
             let sourceTimestamp = time.isSampleTimeValid
                 ? Double(time.sampleTime) / inputFormat.sampleRate
                 : nil
@@ -290,9 +336,108 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
             try engine.start()
         } catch {
             inputNode.removeTap(onBus: 0)
-            audioEngine = nil
-            audioConverter = nil
             throw error
+        }
+
+        let accepted = microphoneLock.withLock { () -> Bool in
+            guard !isStoppingMicrophone else { return false }
+            audioEngine = engine
+            microphoneHealth.reset(at: Self.uptime)
+            return true
+        }
+        if !accepted {
+            inputNode.removeTap(onBus: 0)
+            engine.stop()
+            throw CancellationError()
+        }
+    }
+
+    private func startMicrophoneWatchdog() {
+        microphoneWatchdog?.cancel()
+        microphoneWatchdog = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled else { return }
+                self?.checkMicrophoneActivity()
+            }
+        }
+    }
+
+    private func recordMicrophoneCallback() {
+        microphoneLock.withLock {
+            guard !isStoppingMicrophone, audioEngine != nil else { return }
+            microphoneHealth.observeCallback(at: Self.uptime)
+        }
+    }
+
+    private func checkMicrophoneActivity() {
+        let reason = microphoneLock.withLock { () -> MicrophoneCaptureRecoveryReason? in
+            guard !isStoppingMicrophone,
+                  !isRestartingMicrophone,
+                  audioEngine != nil else { return nil }
+            return microphoneHealth.checkForCallbackStall(at: Self.uptime)
+        }
+        if let reason {
+            requestMicrophoneRecovery(reason)
+        }
+    }
+
+    private func requestMicrophoneRecovery(
+        _ reason: MicrophoneCaptureRecoveryReason
+    ) {
+        let shouldStart = microphoneLock.withLock { () -> Bool in
+            guard !isStoppingMicrophone,
+                  audioEngine != nil,
+                  !isRestartingMicrophone else { return false }
+            isRestartingMicrophone = true
+            return true
+        }
+        guard shouldStart else { return }
+
+        AppLogger.log("Microphone capture recovery requested: \(reason.rawValue)")
+        sessionLogger?.recordCaptureStatus(
+            "capture_recovery_requested",
+            detail: reason.rawValue
+        )
+        Task { [weak self] in
+            self?.recoverMicrophone(reason: reason)
+        }
+    }
+
+    private func recoverMicrophone(
+        reason: MicrophoneCaptureRecoveryReason
+    ) {
+        let previous = microphoneLock.withLock { () -> AVAudioEngine? in
+            let engine = audioEngine
+            audioEngine = nil
+            return engine
+        }
+        previous?.inputNode.removeTap(onBus: 0)
+        previous?.stop()
+
+        do {
+            try installMicrophoneCapture()
+            microphoneLock.withLock {
+                isRestartingMicrophone = false
+            }
+            AppLogger.log("Microphone capture recovered: \(reason.rawValue)")
+            sessionLogger?.recordCaptureStatus(
+                "capture_recovered",
+                detail: reason.rawValue
+            )
+        } catch {
+            let shouldReport = microphoneLock.withLock { () -> Bool in
+                isRestartingMicrophone = false
+                microphoneHealth.allowRecoveryRetry(at: Self.uptime)
+                return !isStoppingMicrophone
+            }
+            guard shouldReport else { return }
+            let detail = "\(reason.rawValue): \(error.localizedDescription)"
+            AppLogger.log("Microphone capture recovery failed: \(detail)")
+            sessionLogger?.recordCaptureStatus(
+                "capture_recovery_failed",
+                detail: detail
+            )
         }
     }
 
@@ -365,12 +510,17 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
     }
 
     func stop() async {
-        if let engine = audioEngine {
-            engine.inputNode.removeTap(onBus: 0)
-            engine.stop()
+        microphoneWatchdog?.cancel()
+        microphoneWatchdog = nil
+        let microphoneEngine = microphoneLock.withLock { () -> AVAudioEngine? in
+            isStoppingMicrophone = true
+            isRestartingMicrophone = false
+            let engine = audioEngine
+            audioEngine = nil
+            return engine
         }
-        audioEngine = nil
-        audioConverter = nil
+        microphoneEngine?.inputNode.removeTap(onBus: 0)
+        microphoneEngine?.stop()
 
         systemAudioWatchdog?.cancel()
         systemAudioWatchdog = nil
@@ -395,6 +545,68 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
 
     private static var uptime: TimeInterval {
         ProcessInfo.processInfo.systemUptime
+    }
+
+    private static func floatSamples(
+        from sampleBuffer: CMSampleBuffer
+    ) -> [Float]? {
+        var result: [Float]?
+        try? sampleBuffer.withAudioBufferList { audioBufferList, blockBuffer in
+            guard let formatDescription = sampleBuffer.formatDescription else { return }
+            let format = AVAudioFormat(
+                cmAudioFormatDescription: formatDescription
+            )
+            guard format.commonFormat == .pcmFormatFloat32,
+                  let buffer = AVAudioPCMBuffer(
+                      pcmFormat: format,
+                      bufferListNoCopy: audioBufferList.unsafePointer
+                  ),
+                  buffer.frameLength > 0 else { return }
+
+            result = withExtendedLifetime(blockBuffer) {
+                let frameCount = Int(buffer.frameLength)
+                let channelCount = Int(format.channelCount)
+                if format.isInterleaved {
+                    let audioBuffer = audioBufferList[0]
+                    guard let data = audioBuffer.mData else { return nil }
+                    let samples = data.assumingMemoryBound(to: Float.self)
+                    var mono = [Float](repeating: 0, count: frameCount)
+                    for frame in 0..<frameCount {
+                        let start = frame * channelCount
+                        var sum: Float = 0
+                        for channel in 0..<channelCount {
+                            sum += samples[start + channel]
+                        }
+                        mono[frame] = sum / Float(channelCount)
+                    }
+                    return mono
+                }
+
+                guard let channels = buffer.floatChannelData else { return nil }
+                if channelCount == 1 {
+                    return Array(
+                        UnsafeBufferPointer(
+                            start: channels[0],
+                            count: frameCount
+                        )
+                    )
+                }
+
+                var mono = [Float](repeating: 0, count: frameCount)
+                for channelIndex in 0..<channelCount {
+                    let source = channels[channelIndex]
+                    for frame in 0..<frameCount {
+                        mono[frame] += source[frame]
+                    }
+                }
+                let scale = 1 / Float(channelCount)
+                for frame in mono.indices {
+                    mono[frame] *= scale
+                }
+                return mono
+            }
+        }
+        return result
     }
 }
 
@@ -429,23 +641,8 @@ extension AudioCaptureService: SCStreamOutput {
         guard isCurrentStream else { return }
         guard type == .audio else { return }
 
-        guard let blockBuffer = sampleBuffer.dataBuffer else { return }
-
-        let length = CMBlockBufferGetDataLength(blockBuffer)
-        guard length > 0 else { return }
-
-        var data = Data(count: length)
-        _ = data.withUnsafeMutableBytes { rawBuffer in
-            CMBlockBufferCopyDataBytes(
-                blockBuffer, atOffset: 0, dataLength: length,
-                destination: rawBuffer.baseAddress!
-            )
-        }
-
-        let floatCount = length / MemoryLayout<Float>.size
-        let floats = data.withUnsafeBytes { rawBuffer in
-            Array(rawBuffer.bindMemory(to: Float.self).prefix(floatCount))
-        }
+        guard let floats = Self.floatSamples(from: sampleBuffer),
+              !floats.isEmpty else { return }
 
         let presentationTime = sampleBuffer.presentationTimeStamp
         let sourceTimestamp = presentationTime.isValid

@@ -72,3 +72,13 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.jiaotangxq.StreamTranslate.ASRBench
         SWIFT_VERSION: "6.0"
+
+  StreamTranslateTranslationBench:
+    type: tool
+    platform: macOS
+    sources:
+      - path: Tools/TranslationBenchmarkMain.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.jiaotangxq.StreamTranslate.TranslationBench
+        SWIFT_VERSION: "6.0"
