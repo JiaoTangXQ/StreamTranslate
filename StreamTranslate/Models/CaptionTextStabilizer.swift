@@ -15,6 +15,7 @@ struct StabilizedCaptionText: Equatable, Sendable {
 /// words nearest the live edge.
 struct CaptionTextStabilizer: Sendable {
     private var segmentStartSample: Int64?
+    private var previousEvidenceEndSample: Int64?
     private var previousTokens: [Token] = []
     private var committedTokenCount = 0
     private var committedKeys: [String] = []
@@ -23,14 +24,17 @@ struct CaptionTextStabilizer: Sendable {
     mutating func update(
         text: String,
         segmentStartSample: Int64,
-        language: SpokenLanguage
+        language: SpokenLanguage,
+        evidenceEndSample: Int64? = nil
     ) -> StabilizedCaptionText {
         if self.segmentStartSample != segmentStartSample {
             reset(for: segmentStartSample)
         }
 
         let tokens = Self.tokens(in: text)
-        if !previousTokens.isEmpty {
+        let hasIndependentEvidence = evidenceEndSample == nil
+            || evidenceEndSample != previousEvidenceEndSample
+        if !previousTokens.isEmpty, hasIndependentEvidence {
             let agreementCount = Self.commonPrefixCount(previousTokens, tokens)
             let holdback = language == .chinese ? 4 : 2
             let targetCount = max(
@@ -45,6 +49,7 @@ struct CaptionTextStabilizer: Sendable {
         }
 
         previousTokens = tokens
+        previousEvidenceEndSample = evidenceEndSample
         return presentation(for: text, tokens: tokens)
     }
 
@@ -57,7 +62,13 @@ struct CaptionTextStabilizer: Sendable {
         }
 
         let tokens = Self.tokens(in: text)
-        committedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if committedKeys.isEmpty {
+            committedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            let boundary = boundaryIndex(in: text, tokens: tokens)
+            committedText += continuation(in: text, from: boundary)
+            committedText = committedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         committedTokenCount = tokens.count
         committedKeys = tokens.map(\.key)
         previousTokens = tokens
@@ -70,6 +81,7 @@ struct CaptionTextStabilizer: Sendable {
 
     mutating func reset() {
         segmentStartSample = nil
+        previousEvidenceEndSample = nil
         previousTokens = []
         committedTokenCount = 0
         committedKeys = []

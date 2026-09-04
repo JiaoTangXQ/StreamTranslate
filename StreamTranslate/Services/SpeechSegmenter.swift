@@ -4,6 +4,10 @@ struct SpeechSegment: Sendable {
     let samples: [Float]
     let startSample: Int64
     let endSample: Int64
+
+    var sampleCount: Int {
+        max(samples.count, Int(max(0, endSample - startSample)))
+    }
 }
 
 enum SpeechSegmentEvent: Sendable {

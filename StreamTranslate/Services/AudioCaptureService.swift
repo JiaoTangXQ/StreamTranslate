@@ -1,13 +1,6 @@
 @preconcurrency import AVFoundation
 import ScreenCaptureKit
 
-struct CapturedAudioChunk: Sendable {
-    let samples: [Float]
-    let sequence: Int64
-    let capturedAt: Date
-    let sourceTimestamp: Double?
-}
-
 enum SystemAudioCaptureRecoveryReason: String, Equatable, Sendable {
     case callbackStall = "ScreenCaptureKit callback stall"
     case streamStopped = "ScreenCaptureKit stream stopped"

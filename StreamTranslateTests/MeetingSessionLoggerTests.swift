@@ -29,6 +29,10 @@ import Testing
         endSample: 1_600
     )
     logger.recordSegment("final_segment", segment: segment)
+    logger.recordPipelineStatus(
+        "recognition_backend",
+        detail: "apple-speech-transcriber-en"
+    )
     logger.recordRecognition(
         "final_recognized",
         segment: segment,
@@ -64,6 +68,8 @@ import Testing
     #expect(capture.contains("\"sequence\":0"))
     #expect(!capture.contains("Can you hear me?"))
     #expect(pipeline.contains("final_recognized"))
+    #expect(pipeline.contains("runtime_sample"))
+    #expect(pipeline.contains("apple-speech-transcriber-en"))
     #expect(pipeline.contains("Can you hear me?"))
     #expect(pipeline.contains("你能听见我吗？"))
 }

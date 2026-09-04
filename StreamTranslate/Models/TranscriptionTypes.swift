@@ -1,5 +1,12 @@
 import Foundation
 
+struct CapturedAudioChunk: Sendable {
+    let samples: [Float]
+    let sequence: Int64
+    let capturedAt: Date
+    let sourceTimestamp: Double?
+}
+
 struct WordTimestamp: Sendable {
     let word: String
     let start: Float

@@ -55,3 +55,20 @@ targets:
       base:
         SWIFT_VERSION: "6.0"
         GENERATE_INFOPLIST_FILE: YES
+
+  StreamTranslateASRBench:
+    type: tool
+    platform: macOS
+    sources:
+      - path: Tools/ASRBenchmarkMain.swift
+      - path: StreamTranslate/Services/AppleStreamingTranscriptionService.swift
+      - path: StreamTranslate/Services/WhisperTranscriptionService.swift
+      - path: StreamTranslate/Models/TranscriptionTypes.swift
+      - path: StreamTranslate/Models/SpokenLanguage.swift
+    dependencies:
+      - package: WhisperKit
+        product: WhisperKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.jiaotangxq.StreamTranslate.ASRBench
+        SWIFT_VERSION: "6.0"

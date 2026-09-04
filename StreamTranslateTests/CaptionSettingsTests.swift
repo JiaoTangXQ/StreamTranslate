@@ -57,8 +57,9 @@ func makeTestDefaults(
     #expect(Set(ids).count == ids.count)
 }
 
-@Test func asrModelDefaultIsMultilingualWhisper() {
-    #expect(ASRModel.defaultModel.id == "openai_whisper-small")
+@Test func asrModelDefaultIsNativeStreamingEnglish() {
+    #expect(ASRModel.defaultModel.id == "apple-speech-transcriber-en")
+    #expect(ASRModel.defaultModel.backend == .appleSpeech)
 }
 
 @Test func asrModelOffersSpeedAndAccuracyPriorities() {
@@ -108,7 +109,7 @@ func makeTestDefaults(
     #expect(settings.fontSize == 15)
     #expect(settings.selectedModelId == ASRModel.defaultModel.id)
     #expect(settings.speechDetectionSensitivity == .automatic)
-    #expect(settings.recognitionLanguageMode == .automatic)
+    #expect(settings.recognitionLanguageMode == .english)
     #expect(settings.recognitionVocabulary.isEmpty)
     #expect(!settings.captureDiagnosticsEnabled)
 }
@@ -148,14 +149,36 @@ func makeTestDefaults(
     defaults.removeObject(forKey: "recognitionLanguageMode")
 }
 
-@Test @MainActor func invalidRecognitionLanguageModeFallsBackToAutomatic() {
+@Test @MainActor func invalidRecognitionLanguageModeFallsBackToModelCompatibleDefault() {
     let defaults = makeTestDefaults()
     defaults.set("unsupported", forKey: "recognitionLanguageMode")
 
     let settings = CaptionSettings(defaults: defaults)
-    #expect(settings.recognitionLanguageMode == .automatic)
+    #expect(settings.recognitionLanguageMode == .english)
 
     defaults.removeObject(forKey: "recognitionLanguageMode")
+}
+
+@Test @MainActor func nonEnglishModeSelectsWhisperFallback() {
+    let defaults = makeTestDefaults()
+    let settings = CaptionSettings(defaults: defaults)
+    #expect(settings.selectedModel.backend == .appleSpeech)
+
+    settings.recognitionLanguageMode = .chinese
+
+    #expect(settings.selectedModel.id == ASRModel.whisperFallback.id)
+    #expect(settings.recognitionLanguageMode == .chinese)
+}
+
+@Test @MainActor func selectingAppleStreamingForcesEnglishMode() {
+    let defaults = makeTestDefaults()
+    defaults.set(ASRModel.whisperFallback.id, forKey: "selectedModelId")
+    defaults.set(RecognitionLanguageMode.automatic.rawValue, forKey: "recognitionLanguageMode")
+    let settings = CaptionSettings(defaults: defaults)
+
+    settings.selectedModelId = ASRModel.defaultModel.id
+
+    #expect(settings.recognitionLanguageMode == .english)
 }
 
 @Test @MainActor func speechDetectionSensitivityRoundTripPersistence() {

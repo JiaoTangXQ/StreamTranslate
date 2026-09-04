@@ -185,11 +185,13 @@ final class CaptionViewModel {
     private var audioCaptureService: AudioCaptureService?
     private var sessionLogger: MeetingSessionLogger?
     private var transcriptionService: WhisperTranscriptionService?
+    private var appleTranscriptionService: AppleStreamingTranscriptionService?
     private var segmentationTask: Task<Void, Never>?
     private var pipelineTask: Task<Void, Never>?
     private var partialTranslationTask: Task<Void, Never>?
+    private var activePartialTranslationOperation: Task<Void, Never>?
     private var partialTranslationQueue: PartialTranslationQueue?
-    private var finalTranslationTail: Task<Void, Never>?
+    private var finalTranslationTasks: [UUID: Task<Void, Never>] = [:]
     private var cleanupTask: Task<Void, Never>?
     private var readyTranslationDirections: Set<TranslationDirection> = []
     private var transcriptionContext = TranscriptionContext()
@@ -214,12 +216,16 @@ final class CaptionViewModel {
             stopCapture()
         }
         transcriptionService = nil
+        appleTranscriptionService?.cancel()
+        appleTranscriptionService = nil
         isModelReady = false
         loadModel(modelId: modelId, switching: true)
     }
 
     private func loadModel(modelId: String, switching: Bool) {
-        let modelName = ASRModel.available.first { $0.id == modelId }?.name ?? "model"
+        let model = ASRModel.available.first { $0.id == modelId }
+            ?? ASRModel.defaultModel
+        let modelName = model.name
         isLoading = true
         statusMessage = switching ? "Switching to \(modelName)..." : "Loading \(modelName)..."
         downloadProgress = 0
@@ -227,24 +233,33 @@ final class CaptionViewModel {
 
         Task {
             do {
-                AppLogger.log("Loading multilingual Whisper model: \(modelId)")
-                let service = try await WhisperTranscriptionService.load(
-                    modelId: modelId,
-                    onDownloadProgress: { [weak self] progress in
-                        Task { @MainActor [weak self] in
-                            self?.downloadProgress = progress
-                            self?.statusMessage = "Downloading \(modelName)..."
+                switch model.backend {
+                case .appleSpeech:
+                    AppLogger.log("Preparing Apple streaming English model")
+                    let service = AppleStreamingTranscriptionService()
+                    try await service.prepare()
+                    appleTranscriptionService = service
+                    transcriptionService = nil
+                case .whisperKit:
+                    AppLogger.log("Loading multilingual Whisper model: \(modelId)")
+                    let service = try await WhisperTranscriptionService.load(
+                        modelId: modelId,
+                        onDownloadProgress: { [weak self] progress in
+                            Task { @MainActor [weak self] in
+                                self?.downloadProgress = progress
+                                self?.statusMessage = "Downloading \(modelName)..."
+                            }
                         }
-                    }
-                )
-                transcriptionService = service
-                activeModel = ASRModel.available.first { $0.id == modelId }
-                    ?? ASRModel.defaultModel
+                    )
+                    transcriptionService = service
+                    appleTranscriptionService = nil
+                }
+                activeModel = model
                 isModelReady = true
                 statusMessage = ""
                 downloadProgress = nil
                 downloadError = nil
-                AppLogger.log("Multilingual Whisper model ready: \(modelId)")
+                AppLogger.log("Speech model ready: \(modelId)")
             } catch {
                 let details = Self.describe(error)
                 AppLogger.log("Whisper model load failed: \(details)")
@@ -317,18 +332,15 @@ final class CaptionViewModel {
             chineseText: chinese,
             sourceLanguage: sourceLanguage
         )
-        captionHistory.append(entry)
-        recentCaptions.append(entry)
-        while recentCaptions.count > maxRecentCaptions {
-            recentCaptions.removeFirst()
-        }
-        scheduleCleanup()
+        appendCaption(entry)
     }
 
     func clearHistory() {
         captionGeneration += 1
-        finalTranslationTail?.cancel()
-        finalTranslationTail = nil
+        activePartialTranslationOperation?.cancel()
+        activePartialTranslationOperation = nil
+        finalTranslationTasks.values.forEach { $0.cancel() }
+        finalTranslationTasks = [:]
         captionHistory = []
         recentCaptions = []
         clearStreamingState()
@@ -380,7 +392,10 @@ final class CaptionViewModel {
             guard isModelReady else { return }
         }
 
-        guard transcriptionService != nil else {
+        guard (activeModel.backend == .appleSpeech
+                && appleTranscriptionService != nil)
+                || (activeModel.backend == .whisperKit
+                    && transcriptionService != nil) else {
             statusMessage = "Model not available"
             return
         }
@@ -449,8 +464,11 @@ final class CaptionViewModel {
         segmentationTask = nil
         pipelineTask?.cancel()
         pipelineTask = nil
+        appleTranscriptionService?.cancel()
         partialTranslationTask?.cancel()
         partialTranslationTask = nil
+        activePartialTranslationOperation?.cancel()
+        activePartialTranslationOperation = nil
         let translationQueue = partialTranslationQueue
         partialTranslationQueue = nil
 
@@ -483,6 +501,74 @@ final class CaptionViewModel {
         sensitivity: SpeechDetectionSensitivity,
         recognitionMode: RecognitionLanguageMode
     ) {
+        if activeModel.backend == .appleSpeech {
+            runApplePipeline(audioStream: audioStream)
+            return
+        }
+        runWhisperPipeline(
+            audioStream: audioStream,
+            sensitivity: sensitivity,
+            recognitionMode: recognitionMode
+        )
+    }
+
+    private func runApplePipeline(
+        audioStream: AsyncStream<CapturedAudioChunk>
+    ) {
+        guard let transcription = appleTranscriptionService else { return }
+        let logger = sessionLogger
+        let translationQueue = PartialTranslationQueue()
+        partialTranslationQueue = translationQueue
+
+        AppLogger.log("Recognition profile: Apple Speech continuous en_US")
+        logger?.recordPipelineStatus(
+            "recognition_backend",
+            detail: "apple-speech-transcriber-en"
+        )
+        partialTranslationTask = Task { [weak self] in
+            while !Task.isCancelled,
+                  let request = await translationQueue.next(),
+                  let self {
+                let operation = Task { [weak self] in
+                    guard let self else { return }
+                    await self.processPartialTranslation(request, logger: logger)
+                }
+                self.activePartialTranslationOperation = operation
+                await operation.value
+                self.activePartialTranslationOperation = nil
+            }
+        }
+
+        pipelineTask = Task { [weak self] in
+            do {
+                let updates = transcription.updates(
+                    from: audioStream,
+                    vocabulary: self?.activeRecognitionVocabulary ?? ""
+                )
+                for try await update in updates {
+                    guard !Task.isCancelled, let self else { break }
+                    await self.processStreamingUpdate(
+                        update,
+                        logger: logger,
+                        partialTranslations: translationQueue
+                    )
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                guard let self else { return }
+                let details = Self.describe(error)
+                self.statusMessage = "Transcription error: \(error.localizedDescription)"
+                AppLogger.log("Apple streaming transcription failed: \(details)")
+            }
+        }
+    }
+
+    private func runWhisperPipeline(
+        audioStream: AsyncStream<CapturedAudioChunk>,
+        sensitivity: SpeechDetectionSensitivity,
+        recognitionMode: RecognitionLanguageMode
+    ) {
         guard let transcription = transcriptionService else { return }
         let logger = sessionLogger
         let eventQueue = SpeechEventQueue()
@@ -497,12 +583,22 @@ final class CaptionViewModel {
                 + "\(modelProfile.subsequentPreviewInterval)s, "
                 + "rolling audio context=\(modelProfile.usesRollingAudioContext)"
         )
+        logger?.recordPipelineStatus(
+            "recognition_backend",
+            detail: modelProfile.id
+        )
 
         partialTranslationTask = Task { [weak self] in
             while !Task.isCancelled,
                   let request = await translationQueue.next(),
                   let self {
-                await self.processPartialTranslation(request, logger: logger)
+                let operation = Task { [weak self] in
+                    guard let self else { return }
+                    await self.processPartialTranslation(request, logger: logger)
+                }
+                self.activePartialTranslationOperation = operation
+                await operation.value
+                self.activePartialTranslationOperation = nil
             }
         }
 
@@ -587,23 +683,12 @@ final class CaptionViewModel {
             guard let direction = TranslationDirection.forSource(output.language) else {
                 return
             }
-            let stableText = showStreamingPartial(output, segment: segment)
-            if PartialTranslationPolicy.shouldRequest(
-                previousText: lastPartialTranslationRequestText,
-                stableText: stableText,
-                language: output.language
-            ) {
-                lastPartialTranslationRequestText = stableText
-                await partialTranslations.submit(
-                    PartialTranslationRequest(
-                        segment: segment,
-                        output: output,
-                        sourceText: stableText,
-                        direction: direction,
-                        generation: captionGeneration
-                    )
-                )
-            }
+            await acceptRecognizedPartial(
+                output,
+                segment: segment,
+                direction: direction,
+                partialTranslations: partialTranslations
+            )
             AppLogger.log(
                 "Partial \(output.language.rawValue) (reported \(output.reportedLanguageCode)): \(output.text)"
             )
@@ -618,6 +703,73 @@ final class CaptionViewModel {
             statusMessage = "Transcription error: \(error.localizedDescription)"
             AppLogger.log("Partial transcription failed: \(Self.describe(error))")
         }
+    }
+
+    private func processStreamingUpdate(
+        _ update: StreamingTranscriptionUpdate,
+        logger: MeetingSessionLogger?,
+        partialTranslations: PartialTranslationQueue
+    ) async {
+        let segment = SpeechSegment(
+            samples: [],
+            startSample: update.startSample,
+            endSample: update.endSample
+        )
+        let stage = update.isFinal ? "final_recognized" : "partial_recognized"
+        logger?.recordRecognition(
+            stage,
+            segment: segment,
+            output: update.output,
+            duration: update.processingLatency
+        )
+        guard let direction = TranslationDirection.forSource(
+            update.output.language
+        ) else { return }
+
+        if update.isFinal {
+            await acceptRecognizedFinal(
+                update.output,
+                segment: segment,
+                direction: direction,
+                logger: logger,
+                partialTranslations: partialTranslations
+            )
+        } else {
+            await acceptRecognizedPartial(
+                update.output,
+                segment: segment,
+                direction: direction,
+                partialTranslations: partialTranslations
+            )
+        }
+    }
+
+    private func acceptRecognizedPartial(
+        _ output: TranscriptionOutput,
+        segment: SpeechSegment,
+        direction: TranslationDirection,
+        partialTranslations: PartialTranslationQueue
+    ) async {
+        let stableText = showStreamingPartial(output, segment: segment)
+        if PartialTranslationPolicy.shouldRequest(
+            previousText: lastPartialTranslationRequestText,
+            stableText: stableText,
+            language: output.language
+        ) {
+            lastPartialTranslationRequestText = stableText
+            await partialTranslations.submit(
+                PartialTranslationRequest(
+                    segment: segment,
+                    output: output,
+                    sourceText: stableText,
+                    direction: direction,
+                    generation: captionGeneration
+                )
+            )
+        }
+        AppLogger.log(
+            "Partial \(output.language.rawValue) (reported \(output.reportedLanguageCode)): \(output.text)"
+        )
     }
 
     private func processPartialTranslation(
@@ -694,76 +846,13 @@ final class CaptionViewModel {
                 clearStreamingState()
                 return
             }
-            await partialTranslations.discard(
-                segmentStartingAt: segment.startSample
+            await acceptRecognizedFinal(
+                output,
+                segment: segment,
+                direction: direction,
+                logger: logger,
+                partialTranslations: partialTranslations
             )
-            let finalPresentation = captionTextStabilizer.finalize(
-                text: output.text,
-                segmentStartSample: segment.startSample
-            )
-            let finalText = finalPresentation.fullText
-            showStreamingFinal(
-                text: finalText,
-                sourceLanguage: output.language,
-                segment: segment
-            )
-            lastPartialTranslationRequestText = finalText
-            AppLogger.log(
-                "Completed \(output.language.rawValue) (reported \(output.reportedLanguageCode)): \(finalText)"
-            )
-
-            let previousFinal = finalTranslationTail
-            let generation = captionGeneration
-            finalTranslationTail = Task { [weak self] in
-                await previousFinal?.value
-                guard !Task.isCancelled, let self else { return }
-
-                let translationStarted = Date()
-                let translation = await self.translate(
-                    finalText,
-                    direction: direction
-                )
-                guard !Task.isCancelled,
-                      self.captionGeneration == generation else { return }
-
-                if let error = translation.error {
-                    logger?.recordPipelineError(
-                        "final_translation_failed",
-                        segment: segment,
-                        error: error
-                    )
-                }
-                logger?.recordTranslation(
-                    "final_translated",
-                    segment: segment,
-                    sourceText: finalText,
-                    translatedText: translation.text,
-                    direction: direction,
-                    duration: Date().timeIntervalSince(translationStarted)
-                )
-
-                let english = output.language == .english
-                    ? finalText
-                    : translation.text
-                let chinese = output.language == .chinese
-                    ? finalText
-                    : translation.text
-                AppLogger.log("Translated \(direction): \(translation.text)")
-                self.commitCompleted(
-                    english: english,
-                    chinese: chinese,
-                    sourceLanguage: output.language,
-                    segmentStartSample: segment.startSample
-                )
-                logger?.recordTranslation(
-                    "caption_committed",
-                    segment: segment,
-                    sourceText: finalText,
-                    translatedText: translation.text,
-                    direction: direction,
-                    duration: 0
-                )
-            }
         } catch is CancellationError {
             return
         } catch {
@@ -775,6 +864,99 @@ final class CaptionViewModel {
             statusMessage = "Transcription error: \(error.localizedDescription)"
             AppLogger.log("Final transcription failed: \(Self.describe(error))")
         }
+    }
+
+    private func acceptRecognizedFinal(
+        _ output: TranscriptionOutput,
+        segment: SpeechSegment,
+        direction: TranslationDirection,
+        logger: MeetingSessionLogger?,
+        partialTranslations: PartialTranslationQueue
+    ) async {
+        activePartialTranslationOperation?.cancel()
+        await partialTranslations.discard(segmentStartingAt: segment.startSample)
+        let finalPresentation = captionTextStabilizer.finalize(
+            text: output.text,
+            segmentStartSample: segment.startSample
+        )
+        let finalText = finalPresentation.fullText
+        let draftTranslation: String
+        if streamingSegmentStartSample == segment.startSample,
+           streamingSourceLanguage == output.language {
+            draftTranslation = streamingTranslatedText
+        } else {
+            draftTranslation = ""
+        }
+        AppLogger.log(
+            "Completed \(output.language.rawValue) (reported \(output.reportedLanguageCode)): \(finalText)"
+        )
+
+        let entry = CaptionEntry(
+            timestamp: .now,
+            englishText: output.language == .english ? finalText : draftTranslation,
+            chineseText: output.language == .chinese ? finalText : draftTranslation,
+            sourceLanguage: output.language
+        )
+        appendCaption(entry)
+        if streamingSegmentStartSample == segment.startSample {
+            clearStreamingState()
+        }
+        logger?.recordTranslation(
+            "caption_source_committed",
+            segment: segment,
+            sourceText: finalText,
+            translatedText: draftTranslation,
+            direction: direction,
+            duration: 0
+        )
+
+        let generation = captionGeneration
+        let entryID = entry.id
+        let task = Task { [weak self] in
+            guard let self else { return }
+            defer { self.finalTranslationTasks[entryID] = nil }
+            guard !Task.isCancelled else { return }
+
+            let translationStarted = Date()
+            let translation = await self.translate(finalText, direction: direction)
+            guard !Task.isCancelled,
+                  self.captionGeneration == generation else { return }
+
+            if let error = translation.error {
+                logger?.recordPipelineError(
+                    "final_translation_failed",
+                    segment: segment,
+                    error: error
+                )
+            }
+            logger?.recordTranslation(
+                "final_translated",
+                segment: segment,
+                sourceText: finalText,
+                translatedText: translation.text,
+                direction: direction,
+                duration: Date().timeIntervalSince(translationStarted)
+            )
+
+            let english = output.language == .english ? finalText : translation.text
+            let chinese = output.language == .chinese ? finalText : translation.text
+            AppLogger.log("Translated \(direction): \(translation.text)")
+            self.updateCaption(
+                id: entryID,
+                english: english,
+                chinese: chinese,
+                sourceLanguage: output.language
+            )
+            logger?.recordTranslation(
+                "caption_committed",
+                segment: segment,
+                sourceText: finalText,
+                translatedText: translation.text,
+                direction: direction,
+                duration: 0
+            )
+        }
+        finalTranslationTasks[entryID] = task
     }
 
     private func recognizePartial(
@@ -967,7 +1149,8 @@ final class CaptionViewModel {
         let presentation = captionTextStabilizer.update(
             text: output.text,
             segmentStartSample: segment.startSample,
-            language: output.language
+            language: output.language,
+            evidenceEndSample: segment.endSample
         )
         streamingSegmentStartSample = segment.startSample
         streamingSourceLanguage = output.language
@@ -1036,20 +1219,36 @@ final class CaptionViewModel {
         )
     }
 
-    private func commitCompleted(
+    private func appendCaption(_ entry: CaptionEntry) {
+        captionHistory.append(entry)
+        recentCaptions.append(entry)
+        while recentCaptions.count > maxRecentCaptions {
+            recentCaptions.removeFirst()
+        }
+        scheduleCleanup()
+    }
+
+    private func updateCaption(
+        id: UUID,
         english: String,
         chinese: String,
-        sourceLanguage: SpokenLanguage,
-        segmentStartSample: Int64
+        sourceLanguage: SpokenLanguage
     ) {
-        if streamingSegmentStartSample == segmentStartSample {
-            clearStreamingState()
+        guard let historyIndex = captionHistory.firstIndex(where: { $0.id == id }) else {
+            return
         }
-        addCaption(
-            english: english,
-            chinese: chinese,
+        let previous = captionHistory[historyIndex]
+        let updated = CaptionEntry(
+            id: id,
+            timestamp: previous.timestamp,
+            englishText: english,
+            chineseText: chinese,
             sourceLanguage: sourceLanguage
         )
+        captionHistory[historyIndex] = updated
+        if let recentIndex = recentCaptions.firstIndex(where: { $0.id == id }) {
+            recentCaptions[recentIndex] = updated
+        }
     }
 
     private func clearStreamingState() {

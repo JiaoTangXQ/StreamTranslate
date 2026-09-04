@@ -15,3 +15,7 @@ default.profraw
 
 # Environment
 .env*
+
+# Tool caches
+__pycache__/
+*.pyc

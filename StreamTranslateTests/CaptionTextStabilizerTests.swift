@@ -76,7 +76,7 @@ import Testing
     #expect(next.draft == "Second sentence")
 }
 
-@Test func finalUsesTheExactFinalRecognitionForTranscriptAccuracy() {
+@Test func finalOnlyRevisesTextAfterTheFrozenPrefix() {
     var stabilizer = CaptionTextStabilizer()
     _ = stabilizer.update(
         text: "I want to discuss the deployment process",
@@ -94,7 +94,32 @@ import Testing
     )
 
     #expect(final.draft.isEmpty)
-    #expect(final.stable == "We should discuss the deployment process today.")
+    #expect(final.stable == "I want to discuss the deployment process today.")
+}
+
+@Test func repeatedUpdatesForTheSameAudioDoNotFreezeSubwordBursts() {
+    var stabilizer = CaptionTextStabilizer()
+    _ = stabilizer.update(
+        text: "Today",
+        segmentStartSample: 10,
+        language: .english,
+        evidenceEndSample: 16_000
+    )
+    let sameAudio = stabilizer.update(
+        text: "Today we are testing",
+        segmentStartSample: 10,
+        language: .english,
+        evidenceEndSample: 16_000
+    )
+    let moreAudio = stabilizer.update(
+        text: "Today we are testing the stream",
+        segmentStartSample: 10,
+        language: .english,
+        evidenceEndSample: 32_000
+    )
+
+    #expect(sameAudio.stable.isEmpty)
+    #expect(moreAudio.stable == "Today we")
 }
 
 @Test func chineseAgreementKeepsFourCharactersEditable() {

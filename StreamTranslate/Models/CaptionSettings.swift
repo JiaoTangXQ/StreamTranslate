@@ -101,7 +101,13 @@ enum TranslationTarget: String, CaseIterable, Identifiable {
 }
 
 struct ASRModel: Identifiable, Hashable {
+    enum Backend: String, Hashable, Sendable {
+        case appleSpeech
+        case whisperKit
+    }
+
     let id: String
+    let backend: Backend
     let priorityName: String
     let name: String
     let size: String
@@ -113,7 +119,20 @@ struct ASRModel: Identifiable, Hashable {
 
     static let available: [ASRModel] = [
         ASRModel(
+            id: "apple-speech-transcriber-en",
+            backend: .appleSpeech,
+            priorityName: "英译中流式",
+            name: "Apple Speech English",
+            size: "系统内置",
+            tradeoff: "连续增量识别；仅固定英文模式",
+            firstPreviewInterval: 0,
+            subsequentPreviewInterval: 0,
+            maximumUtteranceDuration: 0,
+            usesRollingAudioContext: false
+        ),
+        ASRModel(
             id: "openai_whisper-small",
+            backend: .whisperKit,
             priorityName: "速度优先",
             name: "Whisper Small Multilingual",
             size: "~465MB",
@@ -125,6 +144,7 @@ struct ASRModel: Identifiable, Hashable {
         ),
         ASRModel(
             id: "openai_whisper-large-v3-v20240930_626MB",
+            backend: .whisperKit,
             priorityName: "准确度优先",
             name: "Whisper Large-v3 Turbo",
             size: "~626MB",
@@ -137,6 +157,10 @@ struct ASRModel: Identifiable, Hashable {
     ]
 
     static let defaultModel = available[0]
+
+    static let whisperFallback = available.first {
+        $0.id == "openai_whisper-small"
+    }!
 }
 
 @MainActor
@@ -173,6 +197,10 @@ final class CaptionSettings {
                 recognitionLanguageMode.rawValue,
                 forKey: "recognitionLanguageMode"
             )
+            if recognitionLanguageMode != .english,
+               selectedModel.backend == .appleSpeech {
+                selectedModelId = ASRModel.whisperFallback.id
+            }
         }
     }
 
@@ -193,7 +221,13 @@ final class CaptionSettings {
     }
 
     var selectedModelId: String {
-        didSet { defaults.set(selectedModelId, forKey: "selectedModelId") }
+        didSet {
+            defaults.set(selectedModelId, forKey: "selectedModelId")
+            if selectedModel.backend == .appleSpeech,
+               recognitionLanguageMode != .english {
+                recognitionLanguageMode = .english
+            }
+        }
     }
 
     var translationTarget: TranslationTarget {
@@ -224,7 +258,7 @@ final class CaptionSettings {
 
         let savedRecognitionMode = defaults.string(forKey: "recognitionLanguageMode")
             .flatMap(RecognitionLanguageMode.init(rawValue:))
-        recognitionLanguageMode = savedRecognitionMode ?? .automatic
+        recognitionLanguageMode = savedRecognitionMode ?? .english
 
         recognitionVocabulary = defaults.string(forKey: "recognitionVocabulary") ?? ""
 
@@ -245,5 +279,10 @@ final class CaptionSettings {
         let savedTarget = defaults.string(forKey: "translationTarget")
             .flatMap(TranslationTarget.init(rawValue:))
         translationTarget = savedTarget ?? .simplifiedChinese
+
+        if selectedModel.backend == .appleSpeech,
+           recognitionLanguageMode != .english {
+            recognitionLanguageMode = .english
+        }
     }
 }

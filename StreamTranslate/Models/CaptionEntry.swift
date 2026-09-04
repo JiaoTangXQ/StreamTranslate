@@ -1,18 +1,20 @@
 import Foundation
 
 struct CaptionEntry: Identifiable {
-    let id = UUID()
+    let id: UUID
     let timestamp: Date
     let englishText: String
     let chineseText: String
     let sourceLanguage: SpokenLanguage
 
     init(
+        id: UUID = UUID(),
         timestamp: Date,
         englishText: String,
         chineseText: String,
         sourceLanguage: SpokenLanguage = .english
     ) {
+        self.id = id
         self.timestamp = timestamp
         self.englishText = englishText
         self.chineseText = chineseText

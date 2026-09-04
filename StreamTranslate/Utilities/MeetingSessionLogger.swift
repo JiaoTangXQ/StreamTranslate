@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 /// Keeps the evidence needed to distinguish capture gaps from segmentation,
 /// recognition, and translation failures. Each recording session gets a
@@ -21,6 +22,7 @@ final class MeetingSessionLogger: @unchecked Sendable {
     private var audioDataBytes: UInt32 = 0
     private var lastSequence: Int64?
     private var lastSourceEndTime: Double?
+    private var lastRuntimeSampleAt: TimeInterval?
     private var isFinished = false
 
     init(source: AudioInputSource, rootDirectory: URL? = nil) throws {
@@ -94,6 +96,20 @@ final class MeetingSessionLogger: @unchecked Sendable {
             write(event, to: captureLog)
             writeAudio(chunk.samples)
 
+            if lastRuntimeSampleAt == nil
+                || chunk.capturedAt.timeIntervalSince1970
+                    - (lastRuntimeSampleAt ?? 0) >= 5 {
+                lastRuntimeSampleAt = chunk.capturedAt.timeIntervalSince1970
+                write(
+                    RuntimeMetricEvent(
+                        timestamp: chunk.capturedAt.timeIntervalSince1970,
+                        event: "runtime_sample",
+                        physicalFootprintBytes: Self.physicalFootprintBytes()
+                    ),
+                    to: pipelineLog
+                )
+            }
+
             totalSamples += Int64(chunk.samples.count)
             lastSequence = chunk.sequence
             if let sourceTimestamp = chunk.sourceTimestamp {
@@ -124,7 +140,7 @@ final class MeetingSessionLogger: @unchecked Sendable {
                 segmentID: segment.startSample,
                 startSample: segment.startSample,
                 endSample: segment.endSample,
-                sampleCount: segment.samples.count,
+                sampleCount: segment.sampleCount,
                 durationMilliseconds: nil,
                 language: nil,
                 reportedLanguage: nil,
@@ -149,7 +165,7 @@ final class MeetingSessionLogger: @unchecked Sendable {
                 segmentID: segment.startSample,
                 startSample: segment.startSample,
                 endSample: segment.endSample,
-                sampleCount: segment.samples.count,
+                sampleCount: segment.sampleCount,
                 durationMilliseconds: Int(duration * 1_000),
                 language: output?.language.rawValue,
                 reportedLanguage: output?.reportedLanguageCode,
@@ -178,7 +194,7 @@ final class MeetingSessionLogger: @unchecked Sendable {
                 segmentID: segment.startSample,
                 startSample: segment.startSample,
                 endSample: segment.endSample,
-                sampleCount: segment.samples.count,
+                sampleCount: segment.sampleCount,
                 durationMilliseconds: Int(duration * 1_000),
                 language: nil,
                 reportedLanguage: nil,
@@ -202,7 +218,7 @@ final class MeetingSessionLogger: @unchecked Sendable {
                 segmentID: segment.startSample,
                 startSample: segment.startSample,
                 endSample: segment.endSample,
-                sampleCount: segment.samples.count,
+                sampleCount: segment.sampleCount,
                 durationMilliseconds: nil,
                 language: nil,
                 reportedLanguage: nil,
@@ -210,6 +226,16 @@ final class MeetingSessionLogger: @unchecked Sendable {
                 translatedText: nil,
                 direction: nil,
                 error: error
+            )
+        )
+    }
+
+    func recordPipelineStatus(_ event: String, detail: String) {
+        recordPipeline(
+            PipelineStatusEvent(
+                timestamp: Date().timeIntervalSince1970,
+                event: event,
+                detail: detail
             )
         )
     }
@@ -245,11 +271,21 @@ final class MeetingSessionLogger: @unchecked Sendable {
         }
     }
 
-    private func recordPipeline(_ event: PipelineEvent) {
+    private func recordPipeline<T: Encodable & Sendable>(_ event: T) {
         queue.async { [self] in
             guard !isFinished else { return }
             write(event, to: pipelineLog)
         }
+    }
+
+    private static func physicalFootprintBytes() -> UInt64? {
+        var usage = rusage_info_v4()
+        let result = withUnsafeMutablePointer(to: &usage) { pointer in
+            pointer.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) {
+                proc_pid_rusage(getpid(), RUSAGE_INFO_V4, $0)
+            }
+        }
+        return result == 0 ? usage.ri_phys_footprint : nil
     }
 
     private func writeAudio(_ samples: [Float]) {
@@ -427,6 +463,18 @@ private struct CaptureStatusEvent: Encodable {
     let timestamp: TimeInterval
     let event: String
     let detail: String
+}
+
+private struct PipelineStatusEvent: Encodable, Sendable {
+    let timestamp: TimeInterval
+    let event: String
+    let detail: String
+}
+
+private struct RuntimeMetricEvent: Encodable, Sendable {
+    let timestamp: TimeInterval
+    let event: String
+    let physicalFootprintBytes: UInt64?
 }
 
 private struct PipelineEvent: Encodable, Sendable {
