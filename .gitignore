@@ -1,0 +1,17 @@
+# macOS
+.DS_Store
+
+# Xcode
+StreamTranslate.xcodeproj/
+*.xcuserdata
+DerivedData/
+
+# Build
+build/
+default.profraw
+
+# Release artifacts
+*.dmg
+
+# Environment
+.env*
