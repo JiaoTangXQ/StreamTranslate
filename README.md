@@ -1,34 +1,35 @@
 # StreamTranslate
 
-StreamTranslate is a local macOS subtitle overlay for Chinese-English meetings. It listens through the microphone or captures audio playing on the Mac, detects whether each utterance is Chinese or English, and displays the original text together with its translation.
+StreamTranslate is a local macOS subtitle overlay for English↔Chinese meetings and media. Its default English path uses Apple's continuous on-device speech transcriber. An optional Nemotron Metal backend lowers English subtitle latency on the tested M4. Chinese and automatic-language modes remain available through WhisperKit.
 
-## What it does
+## Current behavior
 
-- English speech → English transcript + Chinese translation
-- Chinese speech → Chinese transcript + English translation
-- Incremental bilingual captions while a person is still speaking
-- Stable-prefix captions that keep confirmed words fixed while dimming the editable live edge
-- Selectable on-device Whisper Small or Large-v3 Turbo recognition through WhisperKit/Core ML
-- On-device translation through Apple Translation
-- Microphone mode for nearby participants
-- System Audio mode for calls and media playing on this Mac
-- Floating always-on-top subtitle panel and full transcript history
-- Resizable subtitle panel with saved width and height
-- Automatic, far-field, and nearby speech-detection sensitivity modes
-- `Cmd+Shift+T` global start/stop shortcut
+- English speech → streaming English transcript → simplified or Taiwan traditional Chinese
+- Apple SpeechAnalyzer and optional Nemotron both process each audio chunk once and preserve recognizer state across long utterances
+- A confirmed prefix stays fixed while only the dim live edge may change
+- A conservative prefix starts draft translation before the whole sentence is final
+- Final source text enters transcript history immediately; translation updates the same caption ID later
+- Final translations use Apple Translation's identified batch API, so slow or out-of-order responses cannot overwrite another caption
+- Stopping native streaming recognition closes the audio stream and waits for final words and queued translations before ending the session
+- Whisper Small and Large-v3 Turbo remain selectable for Chinese, automatic language detection, and comparison
+- Microphone and ScreenCaptureKit watchdogs rebuild stalled capture after about three seconds
+- Audio, speech recognition, and translation stay on the Mac
 
-Audio and transcript text are processed locally. Network access is used when WhisperKit downloads the speech model on first use and when macOS needs a missing Apple language pack.
+Network access is needed only when macOS installs missing Apple language assets, WhisperKit downloads an optional Whisper model, or the explicit Nemotron installer downloads its pinned runtime and model.
 
 ## Requirements
 
-- macOS 26.0 or later
-- Apple Silicon Mac
+- Apple Silicon Mac running macOS 26.0 or later
 - Xcode 26.0 or later for source builds
 - Microphone permission for nearby speech
 - Screen Recording permission for System Audio mode
-- At least 800 MB of free disk space for the default model, or 2 GB when keeping both models and their compiled Core ML caches
+- English and Chinese Apple Translation language assets
+- About 700 MB free space per optional Whisper model and compiled Core ML cache
+- About 1 GB free disk space and about 1.05 GB process RSS for optional Nemotron
 
-## Build
+The tested machine is an Apple M4 with 16 GB unified memory on macOS 26.2. The default Apple Speech + Apple Translation path avoids keeping an additional 1.8B translation model resident.
+
+## Build and run
 
 ```bash
 brew install xcodegen
@@ -47,94 +48,153 @@ Open the built app from Xcode or run:
 open ~/Library/Developer/Xcode/DerivedData/StreamTranslate-*/Build/Products/Debug/StreamTranslate.app
 ```
 
-For repeated local installation into `/Applications`, use the stable-signing
-installer. The first run creates a local code-signing identity and may request
-the Mac login password. Later builds keep the same macOS privacy identity, so
-reinstalling does not reset microphone and screen-recording permissions.
+For repeated local installation into `/Applications`, use the stable local signing identity so macOS does not treat each build as a new privacy principal:
 
 ```bash
 ./scripts/install-local.sh
 ```
 
-On first launch, allow the requested permission and wait for `openai_whisper-small` to download and compile. On the tested Mac, the model occupies about 465 MB and the compiled Core ML cache about 212 MB. Selecting **准确度优先** loads the approximately 626 MB Large-v3 Turbo model; selecting **速度优先** returns to Whisper Small.
+## Recommended English→Chinese settings
 
-## Tests
+1. Select **System Audio** for calls or media playing on the Mac; select **Microphone** for nearby speakers.
+2. Keep recognition language on **English**.
+3. On the tested M4, select **最低延迟（本机安装） / Nemotron Streaming English** after installing it. Keep **英译中流式 / Apple Speech English** when minimizing memory or avoiding an optional model installation.
+4. Add names, product names, abbreviations, and technical terms to **Vocabulary**, separated by commas or new lines.
+5. Start from the menu bar or press `Cmd+Shift+T`.
+
+The microphone sensitivity picker applies only to the Whisper path. Apple Speech and Nemotron consume a continuous stream and perform their own phrase finalization.
+
+Install the pinned official NeMo-Speech.cpp Metal runtime and English Q8 model:
 
 ```bash
-xcodebuild test \
-  -project StreamTranslate.xcodeproj \
-  -scheme StreamTranslate \
-  -destination 'platform=macOS'
+./scripts/install-nemotron.sh
 ```
 
-The current suite contains 178 tests.
+The installer supports Apple Silicon only, verifies both SHA-256 checksums, and stores assets under `~/Library/Application Support/StreamTranslate/Nemotron`. The runtime uses the M4 GPU through Metal; it does not use Core ML or the Neural Engine. The measured cold preload was about seven seconds. The app keeps Apple Speech as the installation-free default and reports a direct installation error if Nemotron assets are absent.
 
-## Usage
-
-1. Launch StreamTranslate and wait until the model is ready.
-2. Leave **Microphone** selected to caption people near the Mac. Select **System Audio** for sound playing on the Mac.
-3. Leave **Sensitivity** on **Automatic** for normal use. Select **Far (2–3 m)** when quiet speakers are being missed; it can also react to more room noise.
-4. Add project names, people, and technical terms to **Vocabulary** when a meeting uses specialized wording.
-5. Leave the ASR model on **速度优先** for lower latency, or select **准确度优先** for Large-v3 Turbo. Stop recording before switching models.
-6. Start recording from the menu bar or press `Cmd+Shift+T`.
-7. Speak Chinese or English. While you are speaking, confirmed text stays bright and fixed; the dim live edge may change as more audio arrives. At the pause, the exact final recognition may make one last correction. Existing translation remains visible until its replacement is ready.
-8. Drag the floating panel background to move it, or drag an edge or corner to resize it. The new width and height are saved automatically.
-
-The sensitivity setting controls whether quiet audio is submitted for recognition. It cannot restore speech detail lost to distance, echo, or competing noise. The microphone cannot isolate one participant from other audible sound; loud speakers, television audio, room echo, and overlapping voices can reduce accuracy.
+Use **Whisper Small** for automatic/Chinese recognition or an English accuracy comparison. Use **Large-v3 Turbo** only when its higher per-pass latency is acceptable. Selecting automatic or Chinese mode switches away from the English-only Apple backend.
 
 ## Data flow
 
 ```text
-Microphone → AVAudioEngine → 16 kHz mono audio
-    or
-System Audio → ScreenCaptureKit → 16 kHz audio
-    → adaptive speech segmentation
-    → selected Whisper model language detection + transcription
-    → stable confirmed prefix + editable live edge
-    → Apple Translation in the detected direction
-    → floating bilingual subtitles + transcript history
+Microphone / System Audio → 16 kHz mono chunks
+    ├─ fixed English + Nemotron model
+    │    → NeMo-Speech.cpp Metal streaming state
+    │    → partial/final English results
+    ├─ fixed English + Apple model
+    │    → SpeechAnalyzer streaming state
+    │    → volatile/final English ranges
+    └─ automatic or Chinese + Whisper model
+         → adaptive endpointing
+         → coalesced snapshot recognition
+    → frozen prefix + editable suffix
+    → latest-only draft translation
+    → ID-matched batch final translation
+    → floating subtitles + transcript history
 ```
 
-The segmenter ignores steady room noise and finalizes an utterance after a short pause. In **速度优先** mode it submits source-language previews every 0.75 seconds so the original text stays close to live speech. The slower **准确度优先** model uses one second for the first preview and 1.5 seconds thereafter to avoid inference backlog. Automatic language mode locks an utterance to Chinese or English after two matching detections. Partial translation runs independently and only after the confirmed prefix grows enough to read, instead of retranslating every raw hypothesis. The transcript always stores Whisper's exact final result rather than a stability-layer reconstruction.
+For a first partial, translation may use all but the last two English words. This prefix is not displayed as frozen until independent audio evidence confirms it. A 30 ms debounce merges groups of subword hypotheses emitted in one callback burst.
+
+## Verification
+
+Run the unit and integration suite:
+
+```bash
+xcodegen generate
+xcodebuild test \
+  -project StreamTranslate.xcodeproj \
+  -scheme StreamTranslate \
+  -destination 'platform=macOS' \
+  CODE_SIGNING_ALLOWED=NO
+```
+
+The current suite contains 193 tests.
+
+Build the replayable ASR benchmark:
+
+```bash
+xcodebuild -project StreamTranslate.xcodeproj \
+  -scheme StreamTranslateASRBench \
+  -configuration Release \
+  -destination 'platform=macOS' build \
+  CODE_SIGNING_ALLOWED=NO
+
+StreamTranslateASRBench /path/to/audio.wav \
+  --reference "verbatim English reference" --realtime
+
+# Long-run Apple-only replay
+StreamTranslateASRBench /path/to/audio.wav \
+  --reference "verbatim English reference" --realtime \
+  --repeat 25 --gap-seconds 1.2 --apple-only
+```
+
+Build and run the optional Nemotron benchmark after installation:
+
+```bash
+xcodebuild -project StreamTranslate.xcodeproj \
+  -scheme StreamTranslateNemotronBench \
+  -configuration Release \
+  -destination 'platform=macOS' build \
+  CODE_SIGNING_ALLOWED=NO
+
+StreamTranslateNemotronBench /path/to/audio.wav \
+  --reference "verbatim English reference" --realtime --sessions 2
+```
+
+Build and run the installed Apple Translation benchmark:
+
+```bash
+xcodebuild -project StreamTranslate.xcodeproj \
+  -scheme StreamTranslateTranslationBench \
+  -configuration Release \
+  -destination 'platform=macOS' build \
+  CODE_SIGNING_ALLOWED=NO
+
+StreamTranslateTranslationBench
+StreamTranslateTranslationBench --batch
+StreamTranslateTranslationBench --input /path/to/one-english-sentence-per-line.txt
+```
+
+The retained local measurements and model decisions are in [`docs/benchmark-2026-09-04.md`](docs/benchmark-2026-09-04.md).
+
+## Session diagnostics
+
+Enable **Settings → Diagnostics** only for a measured session. The app writes `source-audio.wav`, `capture.jsonl`, and `pipeline.jsonl` under `~/Library/Logs/StreamTranslate/Sessions/` and automatically prunes old data.
+
+Analyze one session with:
+
+```bash
+python3 Tools/analyze_session.py \
+  ~/Library/Logs/StreamTranslate/Sessions/<session-directory>
+```
+
+The report includes capture gaps, first/p50/p95 capture-to-stage latency, operation time, partial rewrites, visible deletions, peak physical footprint, and pipeline errors.
 
 ## Project structure
 
 ```text
 StreamTranslate/
-├── Models/
-│   ├── CaptionEntry.swift
-│   ├── CaptionSettings.swift
-│   ├── SpokenLanguage.swift
-│   └── TranscriptionTypes.swift
-├── Services/
-│   ├── AudioCaptureService.swift
-│   ├── SpeechSegmenter.swift
-│   ├── TranslationService.swift
-│   └── WhisperTranscriptionService.swift
-├── ViewModels/CaptionViewModel.swift
-├── Views/
-├── Utilities/
-├── Windows/
-└── StreamTranslateApp.swift
+├── Models/                 settings, captions, stability, ASR types
+├── Bridge/                 optional NeMo-Speech.cpp C ABI adapter
+├── Services/               capture, native streaming ASR, Whisper, translation
+├── Utilities/              logging, diagnostics, shortcuts
+├── ViewModels/             pipeline scheduling and UI state
+├── Views/ and Windows/     subtitle and settings UI
+Tools/                      ASR, translation, and session-analysis benchmarks
+StreamTranslateTests/       193 tests
 ```
 
-`project.yml` is the source of truth for the Xcode project. Run `xcodegen generate` after changing targets, dependencies, or file membership.
+`project.yml` is the source of truth for the generated Xcode project.
 
-## Troubleshooting
+## Known limits
 
-- **No microphone text:** enable StreamTranslate under System Settings → Privacy & Security → Microphone, then relaunch it.
-- **No System Audio text:** enable Screen Recording permission and relaunch the app.
-- **Model download fails:** verify the Mac can reach Hugging Face, then use Retry in the model window.
-- **Wrong language or invented text:** reduce speaker volume/echo and move the Mac closer to the participant. The app is intended for Chinese and English only.
-- **Logs:** inspect `~/Library/Logs/StreamTranslate.log`. The file is reset at launch.
-- **Detailed capture evidence:** enable **Settings → Diagnostics** temporarily to save source WAV and JSONL pipeline events under `~/Library/Logs/StreamTranslate/Sessions/`. Leave it off for normal meetings because long sessions can use substantial disk space.
-
-## Known limitations
-
-- Automatic routing is limited to Chinese and English.
-- Simultaneous speakers are mixed into one audio stream.
-- **速度优先** uses Whisper Small and favors latency; **准确度优先** uses Large-v3 Turbo and can take longer per recognition pass.
-- The first model launch is slower because Core ML compiles and caches model programs.
+- The Apple and Nemotron streaming backends are fixed to English. Chinese and automatic routing use Whisper.
+- Nemotron is an optional Metal backend with about 1.05 GB measured process RSS versus 39 MB maximum RSS for the five-minute Apple benchmark. Semantic-normalized WER tied Apple on the five-voice synthetic set; the current evidence supports lower latency, not a general accuracy claim.
+- Overlapping speakers are mixed into one audio stream.
+- Vocabulary is recognition context, not a bilingual translation glossary.
+- Apple Translation on macOS 26.2 has no public glossary or low-latency strategy API. The low-latency strategy first appears in macOS 26.4.
+- A different ad-hoc app signature can require Screen Recording and Microphone permission again; use `scripts/install-local.sh` for repeated installations.
+- Full System Audio validation requires the user-granted Screen Recording permission and cannot be completed by a test process after macOS denies that prompt.
 
 ## License
 

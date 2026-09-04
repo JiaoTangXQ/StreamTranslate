@@ -3,14 +3,6 @@ import CoreMedia
 import Foundation
 import Speech
 
-struct StreamingTranscriptionUpdate: Sendable {
-    let output: TranscriptionOutput
-    let startSample: Int64
-    let endSample: Int64
-    let isFinal: Bool
-    let processingLatency: TimeInterval
-}
-
 enum AppleStreamingTranscriptionError: Error, LocalizedError {
     case unavailable
     case unsupportedEnglishLocale
@@ -37,7 +29,8 @@ enum AppleStreamingTranscriptionError: Error, LocalizedError {
 /// Streams the already-normalized 16 kHz mono capture directly into Apple's
 /// on-device transcriber. Unlike the Whisper snapshot path, audio already seen
 /// by the model is never submitted again.
-final class AppleStreamingTranscriptionService: @unchecked Sendable {
+final class AppleStreamingTranscriptionService: StreamingTranscriptionProviding,
+    @unchecked Sendable {
     private static let sampleRate = 16_000.0
     private static let locale = Locale(identifier: "en_US")
 

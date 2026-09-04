@@ -2,73 +2,113 @@
 
 ## Product boundary
 
-StreamTranslate is a macOS SwiftUI app for local Chinese-English meeting captions. Microphone mode listens to people near the Mac; System Audio mode captures audio playing on the Mac. Each utterance is classified as Chinese or English, transcribed locally, translated in the opposite direction, and shown in an always-on-top panel.
+StreamTranslate is a local macOS SwiftUI app for English↔Chinese live captions. Microphone mode captures nearby speech; System Audio mode captures audio playing on the Mac. The target deployment machine is Apple M4 with 16 GB unified memory and macOS 26.2.
 
-The current target is macOS only. `project.yml` is the XcodeGen source of truth.
+The project is local-first. `project.yml` is the XcodeGen source of truth. Development versions are committed to the local Git repository; no remote push is part of the current work.
 
-## Runtime pipeline
+## Runtime pipelines
 
-1. `AudioCaptureService` produces 16 kHz mono `Float` samples from AVAudioEngine or ScreenCaptureKit.
-2. `SpeechSegmenter` uses an adaptive energy floor, continuous-speech qualification, pre-roll, model-specific preview cadence, and short-pause finalization.
-3. `WhisperTranscriptionService` runs the selected multilingual Whisper model through WhisperKit/Core ML. Automatic mode locks the language after two matching partial detections.
-4. `CaptionTextStabilizer` commits only the prefix that agrees across consecutive hypotheses and keeps a small editable live edge. Finalization replaces the live text once with Whisper's exact final result for transcript accuracy.
-5. `CaptionViewModel` translates throttled stable prefixes without clearing the previous translation, then translates every exact final result.
-6. `FloatingCaptionView` displays bright confirmed text, a dim editable suffix, and transcript history without scrolling on every text revision.
+`AudioCaptureService` produces ordered 16 kHz mono `CapturedAudioChunk` values. Microphone input uses AVAudioEngine conversion. System Audio uses ScreenCaptureKit and interprets each CMSampleBuffer through its Core Media audio format and AudioBufferList. Both capture paths have a three-second callback watchdog and recreate their capture object after a stall.
 
-English input maps to English original + Chinese translation. Chinese input maps to Chinese original + English translation.
+Recognition has three explicit backends:
 
-## Components
+1. Fixed English defaults to `AppleStreamingTranscriptionService`. SpeechAnalyzer and SpeechTranscriber retain streaming state and receive each new chunk once. Volatile and final results retain their audio sample ranges. Apple model retention is `.whileInUse` so switching backends can release its model resources.
+2. Optional fixed-English `NemotronStreamingTranscriptionService` loads the pinned NeMo-Speech.cpp 0.1.0 C ABI at runtime and runs `nemotron-speech-streaming-en-0.6b` Q8 on the Metal GPU. The app does not bundle its 667 MiB model. Assets are installed under Application Support by a checksum-verifying script. Built-in non-VAD endpointing uses 1,200 ms; 800 ms was rejected after it split a test utterance and corrupted its continuation.
+3. Automatic or Chinese recognition uses `WhisperTranscriptionService` through WhisperKit/Core ML. `SpeechSegmenter` supplies pre-roll, adaptive energy gating, short-pause endpointing, preview cadence, and maximum utterance bounds. The event queue discards stale partial work.
 
-- `CaptionViewModel`: main-actor state, model lifecycle, capture control, recognition/translation pipeline, caption history
-- `AudioCaptureService`: microphone and system-audio capture, 16 kHz conversion
-- `SpeechSegmenter`: room-noise gate and utterance boundaries
-- `CaptionTextStabilizer`: monotonic partial text, editable suffix, exact final text, partial-translation cadence
-- `WhisperTranscriptionService`: WhisperKit download, Core ML load, transcription, language result mapping
-- `TranslationService`: Apple `TranslationSession` storage and requests for both directions
-- `FloatingPanel`: resizable transparent `NSPanel`
-- `FloatingCaptionView`: current bilingual caption and history scroll
+All recognition paths feed `CaptionTextStabilizer`. A prefix becomes visibly frozen only after agreement from independent audio evidence; two English words or four Chinese characters remain editable. Draft translation may start earlier from the current hypothesis with the same tail removed. This improves first-Chinese latency without weakening the visible monotonic-prefix rule.
 
-## Model and latency choices
+`PartialTranslationQueue` retains only the newest request. It waits 30 ms to merge an Apple subword callback burst and refuses requests for a segment after that segment becomes final. A final event cancels obsolete draft work.
 
-- Default ASR model: `openai_whisper-small` (**速度优先**)
-- The optional `openai_whisper-large-v3-v20240930_626MB` model is exposed as **准确度优先**. It measured 1.14–4.11 seconds per pass on the target M4/16 GB Mac, so it is never selected automatically.
-- Whisper Small measured 0.27–0.44 seconds per pass on the same Mac.
-- Whisper Small submits the first and later source previews every 0.75 seconds. Large-v3 Turbo uses a one-second first preview and a 1.5-second later interval; the event queue coalesces stale work if inference is slower than the configured cadence.
-- A two-snapshot agreement rule commits the stable prefix while keeping two English words or four Chinese characters editable.
-- Partial translation is requested for the first stable prefix and then after about five English words or ten Chinese characters of growth. The previous translation remains visible while a replacement is prepared.
-- Normal final decoding skips unused timestamps and allows one temperature fallback. Rolling-context decoding enables timestamps only when it needs them to isolate the current utterance.
-- Small can make more recognition errors than Large v3. Keep the model choice manual and preserve Small as the default.
+Final source text is appended to history immediately with a stable UUID. `CaptionViewModel` groups pending final translations by direction, calls `TranslationSession.translate(batch:)` with that UUID as `clientIdentifier`, and updates only the matching caption. Old or out-of-order responses cannot replace a newer caption.
 
-## Persistence and local files
+## Component ownership
 
-- User settings: `UserDefaults`
-- App log: `~/Library/Logs/StreamTranslate.log`, reset at launch
-- Detailed WAV and JSONL session evidence: `~/Library/Logs/StreamTranslate/Sessions/`, only when the user enables Diagnostics
-- Whisper model: `~/Documents/huggingface/models/argmaxinc/whisperkit-coreml/`
-- Core ML cache: `~/Library/Caches/com.jiaotangxq.StreamTranslate/`
+- `CaptionViewModel`: main-actor lifecycle, capture coordination, backend choice, partial/final scheduling, caption history
+- `AudioCaptureService`: AVAudioEngine/ScreenCaptureKit capture, normalization, callback health, recovery
+- `AppleStreamingTranscriptionService`: continuous US-English SpeechAnalyzer input and volatile/final result mapping
+- `NemotronStreamingTranscriptionService` and `NemotronBridge`: optional continuous English Metal inference and safe C ABI ownership
+- `SpeechSegmenter`: Whisper-only energy/VAD-style boundary logic and rolling preview events
+- `CaptionTextStabilizer`: frozen prefix, editable suffix, conservative translation prefix, translation cadence
+- `WhisperTranscriptionService`: optional Whisper model download/load and snapshot transcription
+- `TranslationService`: Apple Translation sessions, single requests, identified batch responses
+- `MeetingSessionLogger`: WAV/capture/pipeline evidence, runtime physical footprint, bounded retention
+- `FloatingCaptionView` and `FloatingPanel`: current bilingual caption, history, stable layout
 
-## Verification
+## Model decisions on the target Mac
 
-Run all tests with:
+- Default English ASR: Apple SpeechTranscriber. A corrected 10.855-second real-time replay first produced text at 1.024 seconds and finalized 0.201 seconds after input ended. A 300.181-second replay finished in 300.397 seconds with 39.0 MB maximum RSS and no swaps. WER was 3.45% on the synthetic content (`first`→`1st`).
+- Lowest-latency installed English option: Nemotron Streaming English 0.6B Q8 through NeMo-Speech.cpp 0.1.0. Two consecutive in-process real-time runs produced a three-word translation-ready prefix at 0.921 and 0.932 seconds, finalized 0.064 and 0.057 seconds after the input ended, and had 0% WER on the primary synthetic sentence. A five-voice set produced a 1.284-second average translation-ready prefix versus Apple's 1.737 seconds. Semantic-normalized aggregate WER tied Apple at 3.28%; this supports a latency improvement, not a general accuracy claim. Maximum observed process RSS was about 1.05 GB and cold model/Metal initialization was about seven seconds.
+- Whisper Small remains the multilingual fallback and comparison backend. The 10.855-second sample took 0.505 seconds as a whole-utterance pass and had 0% WER, but its snapshot architecture cannot keep computation constant as a live utterance grows.
+- Whisper Large-v3 Turbo remains manual. It is not loaded alongside Apple Speech by default.
+- Moonshine Medium Streaming was rejected after local testing: 34.361-second model load, 4.567-second processing for 10.462 seconds of audio, and 10.34% WER with a repeated ending.
+- Hy-MT2 1.8B Q4_K_M was rejected as the default final translator. With a 512-token context it used about 2.1 GB RSS and completed the local technical set in about 2.78 seconds. Apple Translation completed the same set in 0.473–0.677 seconds across two runs with about 18 MB process RSS. Quality was mixed across the examples, so the extra resident model was not justified.
+- Nemotron is optional and selected on the target Mac after local comparison. Apple remains the project default because it requires no separate 667 MiB model and used far less memory. NVIDIA's 560 ms label is a model operating point, not the measured subtitle latency. The official 0.1.0 runtime uses ggml/Metal on Apple Silicon, not Core ML/ANE.
+- Nemotron 3.5 ASR Streaming is not selected for this English-only product path. NVIDIA describes it as the multilingual extension and explicitly recommends the English-specific model for English-only transcription. A model swap needs target-audio evidence, not recency alone.
+
+Detailed measurements live in `docs/benchmark-2026-09-04.md`.
+
+## Metrics and replay
+
+`StreamTranslateASRBench` replays any audio file through Apple streaming ASR and Whisper Small, supports real-time pacing, and reports first result, final lag, wall time, and WER when a reference is supplied.
+
+`StreamTranslateTranslationBench` runs the installed Apple English→Chinese session sequentially or through the batch API. It accepts a one-sentence-per-line input file and prints every source/result pair plus first/p50/p95/max latency.
+
+`StreamTranslateNemotronBench` replays audio through the installed optional backend, reports first raw and three-word translation-ready results, endpoint lag, WER, and can run repeated sessions against one loaded engine to test lifecycle handoff.
+
+When Diagnostics is enabled, each app session writes:
+
+- `source-audio.wav`: exact normalized source used by recognition
+- `capture.jsonl`: sequence numbers, timestamps, source gaps, and recovery events
+- `pipeline.jsonl`: backend, partial/final ranges, recognition/translation stages, errors, and five-second physical-footprint samples
+
+`Tools/analyze_session.py` reports capture gaps, first/p50/p95 stage latency, operation duration, raw partial churn, deletions, peak memory, and errors.
+
+## Verification commands
 
 ```bash
+xcodegen generate
 xcodebuild test \
   -project StreamTranslate.xcodeproj \
   -scheme StreamTranslate \
-  -destination 'platform=macOS'
+  -destination 'platform=macOS' \
+  CODE_SIGNING_ALLOWED=NO
 ```
 
-The current suite has 178 tests. `CaptionTextStabilizerTests` covers monotonic confirmation, rewrite alignment, Chinese holdback, and translation throttling. `SpeechSegmenterTests` covers steady room noise, speech above the learned noise floor, source-preview cadence, pause finalization, and maximum utterance duration.
+The current suite has 193 tests.
 
-For live automation, `touch /tmp/tc-toggle` starts or stops recording. Inspect `~/Library/Logs/StreamTranslate.log` for `Partial`, `Completed`, and `Translated` entries. Enable Diagnostics before capture when WAV/JSONL evidence is required.
+```bash
+xcodebuild -project StreamTranslate.xcodeproj \
+  -scheme StreamTranslateASRBench \
+  -configuration Release \
+  -destination 'platform=macOS' build \
+  CODE_SIGNING_ALLOWED=NO
 
-## Constraints and pitfalls
+xcodebuild -project StreamTranslate.xcodeproj \
+  -scheme StreamTranslateTranslationBench \
+  -configuration Release \
+  -destination 'platform=macOS' build \
+  CODE_SIGNING_ALLOWED=NO
 
-- Keep audio segmentation independent from inference so a model pass cannot postpone pause detection. Re-benchmark if a pass approaches the later-preview interval.
-- Do not expose raw Whisper partials as confirmed text. All live hypotheses must pass through `CaptionTextStabilizer`, while transcript history must retain the exact final recognition.
-- Do not clear an existing translation while preparing its replacement; this changes layout height and makes the reading surface flash.
-- Do not translate only final results; long utterances need throttled stable-prefix translation before the pause.
-- Keep detailed capture diagnostics off by default. Continuous WAV and per-buffer JSONL recording can create gigabytes of data in a long meeting.
-- Microphone audio includes every audible source. Energy gating suppresses steady noise but cannot separate overlapping speakers or a television from a nearby participant.
-- App builds copied with a different temporary signature can trigger a new microphone permission request. Use a consistent local build identity when deploying repeatedly.
-- Translation requires both Chinese→English and English→Chinese sessions to be ready before capture begins.
+xcodebuild -project StreamTranslate.xcodeproj \
+  -scheme StreamTranslateNemotronBench \
+  -configuration Release \
+  -destination 'platform=macOS' build \
+  CODE_SIGNING_ALLOWED=NO
+```
+
+For controlled live automation, `touch /tmp/tc-toggle` starts or stops recording. Full System Audio testing still requires the user-granted Screen Recording permission for the exact installed app identity.
+
+## Constraints
+
+- Do not resubmit previously processed audio to the Apple backend.
+- Do not expose a raw partial as frozen text.
+- Do not wait for translation before committing final source text.
+- Do not identify captions by array position or completion order; use their UUID.
+- Do not clear an existing translation while its replacement is in flight.
+- Do not apply Whisper microphone sensitivity to Apple Speech; it does not use `SpeechSegmenter`.
+- Do not keep Apple Speech and Whisper loaded together unless a measured optional review mode justifies the memory.
+- Do not claim Nemotron uses the Neural Engine or improves general English accuracy; the integrated official runtime is Metal-based and target-audio accuracy evidence is still required.
+- Do not add a 1.8B/7B translation model based only on public benchmarks. Compare representative user content against Apple Translation on the target Mac.
+- Keep Diagnostics off in normal use because continuous WAV/JSONL output consumes disk.
+- Use `scripts/install-local.sh` for repeated local deployment so privacy permissions remain attached to a consistent signing identity.

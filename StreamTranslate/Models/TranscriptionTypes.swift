@@ -7,6 +7,14 @@ struct CapturedAudioChunk: Sendable {
     let sourceTimestamp: Double?
 }
 
+struct StreamingTranscriptionUpdate: Sendable {
+    let output: TranscriptionOutput
+    let startSample: Int64
+    let endSample: Int64
+    let isFinal: Bool
+    let processingLatency: TimeInterval
+}
+
 struct WordTimestamp: Sendable {
     let word: String
     let start: Float
@@ -37,6 +45,15 @@ struct TranscriptionOutput: Sendable {
         self.averageLogProbability = averageLogProbability
         self.noSpeechProbability = noSpeechProbability
     }
+}
+
+protocol StreamingTranscriptionProviding: AnyObject, Sendable {
+    func updates(
+        from audioStream: AsyncStream<CapturedAudioChunk>,
+        vocabulary: String
+    ) -> AsyncThrowingStream<StreamingTranscriptionUpdate, Error>
+
+    func cancel()
 }
 
 enum TranscriptionTextPolicy {

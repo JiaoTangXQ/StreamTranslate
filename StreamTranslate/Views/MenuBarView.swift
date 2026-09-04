@@ -31,6 +31,7 @@ struct MenuBarView: View {
             .controlSize(.large)
             .disabled(
                 viewModel.isStartingCapture
+                    || viewModel.isFinalizingCapture
                     || viewModel.isPreparingTranslation
                     || !viewModel.isTranslationReady
                     || (viewModel.isLoading && !viewModel.isModelReady)
@@ -50,7 +51,11 @@ struct MenuBarView: View {
                     .labelsHidden()
                     .frame(width: 112)
                 }
-                .disabled(viewModel.isRecording || viewModel.isStartingCapture)
+                .disabled(
+                    viewModel.isRecording
+                        || viewModel.isStartingCapture
+                        || viewModel.isFinalizingCapture
+                )
             }
 
             Divider()
@@ -66,6 +71,7 @@ struct MenuBarView: View {
     private var statusLabel: String {
         if viewModel.isLoading { return viewModel.statusMessage.isEmpty ? "Loading model..." : viewModel.statusMessage }
         if viewModel.isPreparingTranslation { return "Preparing translation..." }
+        if viewModel.isFinalizingCapture { return "Finalizing last words..." }
         if viewModel.isStartingCapture { return "Starting audio..." }
         if viewModel.isRecording { return "Recording" }
         if viewModel.isModelReady { return "Ready" }
@@ -76,6 +82,7 @@ struct MenuBarView: View {
         if viewModel.isRecording { return "Stop" }
         if viewModel.isLoading { return "Loading..." }
         if viewModel.isPreparingTranslation { return "Preparing..." }
+        if viewModel.isFinalizingCapture { return "Finalizing..." }
         if viewModel.isStartingCapture { return "Starting..." }
         return "Start"
     }

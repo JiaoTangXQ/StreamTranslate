@@ -168,6 +168,7 @@ private actor TranslationGate {
 final class CaptionViewModel {
     var isRecording = false
     var isStartingCapture = false
+    var isFinalizingCapture = false
     var isLoading = false
     var isModelReady = false
     var isPreparingTranslation = false
@@ -211,7 +212,7 @@ final class CaptionViewModel {
     private var audioCaptureService: AudioCaptureService?
     private var sessionLogger: MeetingSessionLogger?
     private var transcriptionService: WhisperTranscriptionService?
-    private var appleTranscriptionService: AppleStreamingTranscriptionService?
+    private var streamingTranscriptionService: (any StreamingTranscriptionProviding)?
     private var segmentationTask: Task<Void, Never>?
     private var pipelineTask: Task<Void, Never>?
     private var partialTranslationTask: Task<Void, Never>?
@@ -239,13 +240,13 @@ final class CaptionViewModel {
     }
 
     func switchModel(to modelId: String) {
-        guard !isLoading else { return }
+        guard !isLoading, !isStartingCapture, !isFinalizingCapture else { return }
         if isRecording {
-            stopCapture()
+            stopCapture(gracefully: false)
         }
         transcriptionService = nil
-        appleTranscriptionService?.cancel()
-        appleTranscriptionService = nil
+        streamingTranscriptionService?.cancel()
+        streamingTranscriptionService = nil
         isModelReady = false
         loadModel(modelId: modelId, switching: true)
     }
@@ -256,17 +257,22 @@ final class CaptionViewModel {
         let modelName = model.name
         isLoading = true
         statusMessage = switching ? "Switching to \(modelName)..." : "Loading \(modelName)..."
-        downloadProgress = 0
+        downloadProgress = model.backend == .whisperKit ? 0 : nil
         downloadError = nil
 
         Task {
             do {
                 switch model.backend {
+                case .nemotron:
+                    AppLogger.log("Loading Nemotron streaming English model")
+                    let service = try await NemotronStreamingTranscriptionService.load()
+                    streamingTranscriptionService = service
+                    transcriptionService = nil
                 case .appleSpeech:
                     AppLogger.log("Preparing Apple streaming English model")
                     let service = AppleStreamingTranscriptionService()
                     try await service.prepare()
-                    appleTranscriptionService = service
+                    streamingTranscriptionService = service
                     transcriptionService = nil
                 case .whisperKit:
                     AppLogger.log("Loading multilingual Whisper model: \(modelId)")
@@ -280,7 +286,7 @@ final class CaptionViewModel {
                         }
                     )
                     transcriptionService = service
-                    appleTranscriptionService = nil
+                    streamingTranscriptionService = nil
                 }
                 activeModel = model
                 isModelReady = true
@@ -290,7 +296,7 @@ final class CaptionViewModel {
                 AppLogger.log("Speech model ready: \(modelId)")
             } catch {
                 let details = Self.describe(error)
-                AppLogger.log("Whisper model load failed: \(details)")
+                AppLogger.log("Speech model load failed: \(details)")
                 let message = "Model load failed: \(error.localizedDescription)"
                 statusMessage = message
                 downloadError = message
@@ -390,7 +396,7 @@ final class CaptionViewModel {
         AppLogger.log("toggleCapture called, isRecording=\(isRecording), isModelReady=\(isModelReady)")
         if isRecording {
             stopCapture()
-        } else if !isStartingCapture {
+        } else if !isStartingCapture, !isFinalizingCapture {
             Task {
                 await startCapture(
                     source: source,
@@ -410,7 +416,7 @@ final class CaptionViewModel {
         recognitionVocabulary: String = "",
         captureDiagnosticsEnabled: Bool = false
     ) async {
-        guard !isRecording, !isStartingCapture else { return }
+        guard !isRecording, !isStartingCapture, !isFinalizingCapture else { return }
         isStartingCapture = true
         defer { isStartingCapture = false }
 
@@ -422,8 +428,8 @@ final class CaptionViewModel {
             guard isModelReady else { return }
         }
 
-        guard (activeModel.backend == .appleSpeech
-                && appleTranscriptionService != nil)
+        guard (activeModel.usesNativeStreaming
+                && streamingTranscriptionService != nil)
                 || (activeModel.backend == .whisperKit
                     && transcriptionService != nil) else {
             statusMessage = "Model not available"
@@ -458,10 +464,14 @@ final class CaptionViewModel {
             let audioStream = audioService.makeAudioStream()
             audioCaptureService = audioService
             sessionLogger = logger
-            statusMessage = ""
+            statusMessage = source == .microphone
+                ? "Starting microphone capture..."
+                : "Starting system audio capture..."
+            AppLogger.log("Starting audio capture: \(source.rawValue)")
 
             try await audioService.start()
             isRecording = true
+            statusMessage = ""
             transcriptionContext.reset()
             activeRecognitionVocabulary = recognitionVocabulary
             let effectiveSensitivity: SpeechDetectionSensitivity = source == .microphone
@@ -488,13 +498,18 @@ final class CaptionViewModel {
         }
     }
 
-    func stopCapture() {
+    func stopCapture(gracefully: Bool = true) {
+        if gracefully, activeModel.usesNativeStreaming {
+            stopStreamingCaptureGracefully()
+            return
+        }
+
         isRecording = false
         segmentationTask?.cancel()
         segmentationTask = nil
         pipelineTask?.cancel()
         pipelineTask = nil
-        appleTranscriptionService?.cancel()
+        streamingTranscriptionService?.cancel()
         partialTranslationTask?.cancel()
         partialTranslationTask = nil
         activePartialTranslationOperation?.cancel()
@@ -524,6 +539,55 @@ final class CaptionViewModel {
         AppLogger.log("Audio capture stopped")
     }
 
+    private func stopStreamingCaptureGracefully() {
+        guard isRecording, !isFinalizingCapture else { return }
+        isRecording = false
+        isFinalizingCapture = true
+        statusMessage = "Finalizing last words..."
+
+        let service = audioCaptureService
+        let logger = sessionLogger
+        let recognition = pipelineTask
+        let translations = partialTranslationTask
+        let translationQueue = partialTranslationQueue
+        audioCaptureService = nil
+        sessionLogger = nil
+        pipelineTask = nil
+        partialTranslationTask = nil
+        partialTranslationQueue = nil
+        segmentationTask?.cancel()
+        segmentationTask = nil
+        transcriptionContext.reset()
+
+        Task {
+            await service?.stop()
+            await recognition?.value
+            await translationQueue?.finish()
+            translations?.cancel()
+            await translations?.value
+            activePartialTranslationOperation?.cancel()
+            activePartialTranslationOperation = nil
+
+            if hasStreamingText {
+                addCaption(
+                    english: streamingEnglish,
+                    chinese: streamingChinese,
+                    sourceLanguage: streamingSourceLanguage
+                )
+                clearStreamingState()
+            }
+
+            let finalWorker = finalTranslationWorker
+            await finalWorker?.value
+            logger?.finish()
+            isFinalizingCapture = false
+            if statusMessage == "Finalizing last words..." {
+                statusMessage = ""
+            }
+            AppLogger.log("Streaming audio capture stopped after finalization")
+        }
+    }
+
     // MARK: - Multilingual transcription pipeline
 
     private func runPipeline(
@@ -531,8 +595,8 @@ final class CaptionViewModel {
         sensitivity: SpeechDetectionSensitivity,
         recognitionMode: RecognitionLanguageMode
     ) {
-        if activeModel.backend == .appleSpeech {
-            runApplePipeline(audioStream: audioStream)
+        if activeModel.usesNativeStreaming {
+            runNativeStreamingPipeline(audioStream: audioStream)
             return
         }
         runWhisperPipeline(
@@ -542,18 +606,18 @@ final class CaptionViewModel {
         )
     }
 
-    private func runApplePipeline(
+    private func runNativeStreamingPipeline(
         audioStream: AsyncStream<CapturedAudioChunk>
     ) {
-        guard let transcription = appleTranscriptionService else { return }
+        guard let transcription = streamingTranscriptionService else { return }
         let logger = sessionLogger
         let translationQueue = PartialTranslationQueue()
         partialTranslationQueue = translationQueue
 
-        AppLogger.log("Recognition profile: Apple Speech continuous en_US")
+        AppLogger.log("Recognition profile: \(activeModel.name) continuous en_US")
         logger?.recordPipelineStatus(
             "recognition_backend",
-            detail: "apple-speech-transcriber-en"
+            detail: activeModel.id
         )
         partialTranslationTask = Task { [weak self] in
             while !Task.isCancelled,
@@ -594,7 +658,10 @@ final class CaptionViewModel {
                 guard let self else { return }
                 let details = Self.describe(error)
                 self.statusMessage = "Transcription error: \(error.localizedDescription)"
-                AppLogger.log("Apple streaming transcription failed: \(details)")
+                AppLogger.log(
+                    "Native streaming transcription failed "
+                        + "[\(self.activeModel.backend.rawValue)]: \(details)"
+                )
             }
         }
     }
@@ -976,7 +1043,12 @@ final class CaptionViewModel {
 
     private func enqueueFinalTranslation(_ request: FinalTranslationRequest) {
         pendingFinalTranslations.append(request)
-        guard finalTranslationWorker == nil else { return }
+        startFinalTranslationWorkerIfNeeded()
+    }
+
+    private func startFinalTranslationWorkerIfNeeded() {
+        guard finalTranslationWorker == nil,
+              !pendingFinalTranslations.isEmpty else { return }
         let workerID = UUID()
         finalTranslationWorkerID = workerID
         finalTranslationWorker = Task { [weak self] in
@@ -997,6 +1069,7 @@ final class CaptionViewModel {
             guard self?.finalTranslationWorkerID == workerID else { return }
             self?.finalTranslationWorker = nil
             self?.finalTranslationWorkerID = nil
+            self?.startFinalTranslationWorkerIfNeeded()
         }
     }
 

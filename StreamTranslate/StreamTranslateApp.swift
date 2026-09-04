@@ -118,7 +118,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             onOpenTranscript: { [weak self] in self?.openTranscriptWindow() },
             onOpenSettings: { [weak self] in self?.openSettingsWindow() },
             onQuit: { [weak self] in
-                self?.viewModel.stopCapture()
+                self?.viewModel.stopCapture(gracefully: false)
                 NSApp.terminate(nil)
             }
         )

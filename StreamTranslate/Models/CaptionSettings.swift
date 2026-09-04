@@ -102,6 +102,7 @@ enum TranslationTarget: String, CaseIterable, Identifiable {
 
 struct ASRModel: Identifiable, Hashable {
     enum Backend: String, Hashable, Sendable {
+        case nemotron
         case appleSpeech
         case whisperKit
     }
@@ -118,6 +119,18 @@ struct ASRModel: Identifiable, Hashable {
     let usesRollingAudioContext: Bool
 
     static let available: [ASRModel] = [
+        ASRModel(
+            id: "nvidia-nemotron-streaming-en-0.6b",
+            backend: .nemotron,
+            priorityName: "最低延迟（本机安装）",
+            name: "Nemotron Streaming English",
+            size: "667MB / 约1GB内存",
+            tradeoff: "Metal增量识别；仅固定英文模式",
+            firstPreviewInterval: 0,
+            subsequentPreviewInterval: 0,
+            maximumUtteranceDuration: 0,
+            usesRollingAudioContext: false
+        ),
         ASRModel(
             id: "apple-speech-transcriber-en",
             backend: .appleSpeech,
@@ -156,11 +169,19 @@ struct ASRModel: Identifiable, Hashable {
         ),
     ]
 
-    static let defaultModel = available[0]
+    static let defaultModel = available[1]
 
     static let whisperFallback = available.first {
         $0.id == "openai_whisper-small"
     }!
+
+    var supportsOnlyEnglish: Bool {
+        backend != .whisperKit
+    }
+
+    var usesNativeStreaming: Bool {
+        backend != .whisperKit
+    }
 }
 
 @MainActor
@@ -198,7 +219,7 @@ final class CaptionSettings {
                 forKey: "recognitionLanguageMode"
             )
             if recognitionLanguageMode != .english,
-               selectedModel.backend == .appleSpeech {
+               selectedModel.supportsOnlyEnglish {
                 selectedModelId = ASRModel.whisperFallback.id
             }
         }
@@ -223,7 +244,7 @@ final class CaptionSettings {
     var selectedModelId: String {
         didSet {
             defaults.set(selectedModelId, forKey: "selectedModelId")
-            if selectedModel.backend == .appleSpeech,
+            if selectedModel.supportsOnlyEnglish,
                recognitionLanguageMode != .english {
                 recognitionLanguageMode = .english
             }
@@ -280,7 +301,7 @@ final class CaptionSettings {
             .flatMap(TranslationTarget.init(rawValue:))
         translationTarget = savedTarget ?? .simplifiedChinese
 
-        if selectedModel.backend == .appleSpeech,
+        if selectedModel.supportsOnlyEnglish,
            recognitionLanguageMode != .english {
             recognitionLanguageMode = .english
         }

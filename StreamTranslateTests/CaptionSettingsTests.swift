@@ -62,6 +62,15 @@ func makeTestDefaults(
     #expect(ASRModel.defaultModel.backend == .appleSpeech)
 }
 
+@Test func asrModelOffersInstalledNemotronStreaming() {
+    let model = ASRModel.available.first {
+        $0.id == "nvidia-nemotron-streaming-en-0.6b"
+    }
+    #expect(model?.backend == .nemotron)
+    #expect(model?.supportsOnlyEnglish == true)
+    #expect(model?.usesNativeStreaming == true)
+}
+
 @Test func asrModelOffersSpeedAndAccuracyPriorities() {
     let modelsByPriority = Dictionary(
         uniqueKeysWithValues: ASRModel.available.map { ($0.priorityName, $0) }
@@ -170,6 +179,24 @@ func makeTestDefaults(
     #expect(settings.recognitionLanguageMode == .chinese)
 }
 
+@Test @MainActor func nonEnglishModeSwitchesNemotronToWhisperFallback() {
+    let defaults = makeTestDefaults()
+    defaults.set(
+        "nvidia-nemotron-streaming-en-0.6b",
+        forKey: "selectedModelId"
+    )
+    defaults.set(
+        RecognitionLanguageMode.english.rawValue,
+        forKey: "recognitionLanguageMode"
+    )
+    let settings = CaptionSettings(defaults: defaults)
+
+    settings.recognitionLanguageMode = .chinese
+
+    #expect(settings.selectedModel.id == ASRModel.whisperFallback.id)
+    #expect(settings.recognitionLanguageMode == .chinese)
+}
+
 @Test @MainActor func selectingAppleStreamingForcesEnglishMode() {
     let defaults = makeTestDefaults()
     defaults.set(ASRModel.whisperFallback.id, forKey: "selectedModelId")
@@ -177,6 +204,20 @@ func makeTestDefaults(
     let settings = CaptionSettings(defaults: defaults)
 
     settings.selectedModelId = ASRModel.defaultModel.id
+
+    #expect(settings.recognitionLanguageMode == .english)
+}
+
+@Test @MainActor func selectingNemotronForcesEnglishMode() {
+    let defaults = makeTestDefaults()
+    defaults.set(ASRModel.whisperFallback.id, forKey: "selectedModelId")
+    defaults.set(
+        RecognitionLanguageMode.automatic.rawValue,
+        forKey: "recognitionLanguageMode"
+    )
+    let settings = CaptionSettings(defaults: defaults)
+
+    settings.selectedModelId = "nvidia-nemotron-streaming-en-0.6b"
 
     #expect(settings.recognitionLanguageMode == .english)
 }

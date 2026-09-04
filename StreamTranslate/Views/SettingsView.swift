@@ -21,9 +21,15 @@ struct SettingsView: View {
                     }
                 }
                 .pickerStyle(.radioGroup)
-                .disabled(viewModel.isRecording || viewModel.isStartingCapture)
+                .disabled(
+                    viewModel.isRecording
+                        || viewModel.isStartingCapture
+                        || viewModel.isFinalizingCapture
+                )
 
-                if viewModel.isRecording || viewModel.isStartingCapture {
+                if viewModel.isRecording
+                    || viewModel.isStartingCapture
+                    || viewModel.isFinalizingCapture {
                     Text("Stop recording before switching the audio source")
                         .font(.caption)
                         .foregroundStyle(.orange)
@@ -39,19 +45,25 @@ struct SettingsView: View {
                             Text(sensitivity.displayName).tag(sensitivity)
                         }
                     }
-                    .disabled(viewModel.isRecording || viewModel.isStartingCapture)
+                    .disabled(
+                        viewModel.isRecording
+                            || viewModel.isStartingCapture
+                            || viewModel.isFinalizingCapture
+                    )
 
                     Text(settings.speechDetectionSensitivity.detail)
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
-                    if viewModel.isRecording || viewModel.isStartingCapture {
+                    if viewModel.isRecording
+                        || viewModel.isStartingCapture
+                        || viewModel.isFinalizingCapture {
                         Text("Stop recording before changing sensitivity")
                             .font(.caption)
                             .foregroundStyle(.orange)
                     }
                 } else if settings.audioInputSource == .microphone {
-                    Text("Apple Speech receives a continuous stream and determines phrase boundaries itself; the sensitivity setting is not used.")
+                    Text("The selected streaming recognizer determines phrase boundaries itself; the sensitivity setting is not used.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -64,7 +76,11 @@ struct SettingsView: View {
                     }
                 }
                 .pickerStyle(.segmented)
-                .disabled(viewModel.isRecording || viewModel.isStartingCapture)
+                .disabled(
+                    viewModel.isRecording
+                        || viewModel.isStartingCapture
+                        || viewModel.isFinalizingCapture
+                )
 
                 Text(settings.recognitionLanguageMode.detail)
                     .font(.caption)
@@ -77,14 +93,20 @@ struct SettingsView: View {
                         axis: .vertical
                     )
                     .lineLimit(2...4)
-                    .disabled(viewModel.isRecording || viewModel.isStartingCapture)
+                    .disabled(
+                        viewModel.isRecording
+                            || viewModel.isStartingCapture
+                            || viewModel.isFinalizingCapture
+                    )
                 }
 
                 Text("Comma-separated names and technical terms are supplied to the selected recognizer as context.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-                if viewModel.isRecording || viewModel.isStartingCapture {
+                if viewModel.isRecording
+                    || viewModel.isStartingCapture
+                    || viewModel.isFinalizingCapture {
                     Text("Stop recording before changing recognition language")
                         .font(.caption)
                         .foregroundStyle(.orange)
@@ -133,7 +155,12 @@ struct SettingsView: View {
                     }
                 }
                 .pickerStyle(.radioGroup)
-                .disabled(viewModel.isRecording || viewModel.isLoading)
+                .disabled(
+                    viewModel.isRecording
+                        || viewModel.isStartingCapture
+                        || viewModel.isFinalizingCapture
+                        || viewModel.isLoading
+                )
 
                 if viewModel.isLoading {
                     HStack(spacing: 8) {
@@ -173,7 +200,11 @@ struct SettingsView: View {
                     "Record source audio and detailed pipeline events",
                     isOn: $settings.captureDiagnosticsEnabled
                 )
-                .disabled(viewModel.isRecording || viewModel.isStartingCapture)
+                .disabled(
+                    viewModel.isRecording
+                        || viewModel.isStartingCapture
+                        || viewModel.isFinalizingCapture
+                )
 
                 Text("Use only while troubleshooting. Long sessions can consume substantial disk space.")
                     .font(.caption)
@@ -183,7 +214,10 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .frame(width: 450, height: 600)
         .onChange(of: settings.selectedModelId) { _, newModelId in
-            guard !viewModel.isRecording, !viewModel.isLoading else { return }
+            guard !viewModel.isRecording,
+                  !viewModel.isStartingCapture,
+                  !viewModel.isFinalizingCapture,
+                  !viewModel.isLoading else { return }
             viewModel.switchModel(to: newModelId)
         }
     }

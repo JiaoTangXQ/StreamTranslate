@@ -31,7 +31,8 @@ struct MainWindowView: View {
                 HStack(spacing: 6) {
                     if viewModel.isLoading
                         || viewModel.isPreparingTranslation
-                        || viewModel.isStartingCapture {
+                        || viewModel.isStartingCapture
+                        || viewModel.isFinalizingCapture {
                         ProgressView()
                             .controlSize(.small)
                     } else {
@@ -57,6 +58,7 @@ struct MainWindowView: View {
                     || viewModel.isPreparingTranslation
                     || !viewModel.isTranslationReady
                     || viewModel.isStartingCapture
+                    || viewModel.isFinalizingCapture
             )
 
             if !viewModel.statusMessage.isEmpty {
@@ -87,6 +89,7 @@ struct MainWindowView: View {
     private var toolbarButtonLabel: String {
         if viewModel.isLoading { return "Loading..." }
         if viewModel.isPreparingTranslation { return "Preparing translation..." }
+        if viewModel.isFinalizingCapture { return "Finalizing last words..." }
         if viewModel.isStartingCapture { return "Starting..." }
         if viewModel.isRecording { return "Recording" }
         return "Start"

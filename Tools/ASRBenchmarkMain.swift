@@ -6,24 +6,53 @@ enum ASRBenchmarkMain {
     static func main() async throws {
         let arguments = Array(CommandLine.arguments.dropFirst())
         guard let audioPath = arguments.first else {
-            print("usage: StreamTranslateASRBench <audio-file> [--reference <text>] [--realtime]")
+            print(
+                "usage: StreamTranslateASRBench <audio-file> "
+                    + "[--reference <text>] [--realtime] [--repeat <count>] "
+                    + "[--gap-seconds <seconds>] [--apple-only|--whisper-only]"
+            )
             Foundation.exit(2)
         }
         let realtime = arguments.contains("--realtime")
-        let reference = value(after: "--reference", in: arguments)
-        let samples = try load16kMonoSamples(
+        let repeatCount = max(1, Int(value(after: "--repeat", in: arguments) ?? "1") ?? 1)
+        let gapSeconds = max(
+            0,
+            Double(value(after: "--gap-seconds", in: arguments) ?? "0") ?? 0
+        )
+        let baseReference = value(after: "--reference", in: arguments)
+        let baseSamples = try load16kMonoSamples(
             from: URL(fileURLWithPath: audioPath)
         )
-        let duration = Double(samples.count) / 16_000
-        print(String(format: "audio duration=%.3fs samples=%d", duration, samples.count))
-
-        try await benchmarkApple(
-            samples: samples,
-            duration: duration,
-            realtime: realtime,
-            reference: reference
+        let samples = repeatedSamples(
+            baseSamples,
+            count: repeatCount,
+            gapSeconds: gapSeconds
         )
-        try await benchmarkWhisper(samples: samples, reference: reference)
+        let reference = baseReference.map {
+            Array(repeating: $0, count: repeatCount).joined(separator: " ")
+        }
+        let duration = Double(samples.count) / 16_000
+        print(
+            String(
+                format: "audio duration=%.3fs samples=%d repeat=%d gap=%.3fs",
+                duration,
+                samples.count,
+                repeatCount,
+                gapSeconds
+            )
+        )
+
+        if !arguments.contains("--whisper-only") {
+            try await benchmarkApple(
+                samples: samples,
+                duration: duration,
+                realtime: realtime,
+                reference: reference
+            )
+        }
+        if !arguments.contains("--apple-only") {
+            try await benchmarkWhisper(samples: samples, reference: reference)
+        }
     }
 
     private static func benchmarkApple(
@@ -38,6 +67,8 @@ enum ASRBenchmarkMain {
         let stream = AsyncStream<CapturedAudioChunk> { continuation in
             Task {
                 let chunkSize = 1_600
+                let pacingClock = ContinuousClock()
+                let pacingStartedAt = pacingClock.now
                 var sequence: Int64 = 0
                 var offset = 0
                 while offset < samples.count {
@@ -51,8 +82,12 @@ enum ASRBenchmarkMain {
                         )
                     )
                     if realtime {
-                        let chunkDuration = Double(end - offset) / 16_000
-                        try? await Task.sleep(for: .seconds(chunkDuration))
+                        let sourceEnd = Double(end) / 16_000
+                        try? await pacingClock.sleep(
+                            until: pacingStartedAt.advanced(
+                                by: .seconds(sourceEnd)
+                            )
+                        )
                     }
                     offset = end
                     sequence += 1
@@ -62,14 +97,24 @@ enum ASRBenchmarkMain {
         }
 
         var firstResultSeconds: Double?
+        var firstResultText: String?
+        var firstTranslationReadySeconds: Double?
+        var partialCount = 0
         var finals: [String] = []
         for try await update in service.updates(from: stream, vocabulary: "") {
             let elapsed = seconds(startedAt.duration(to: clock.now))
             if firstResultSeconds == nil {
                 firstResultSeconds = elapsed
+                firstResultText = update.output.text
+            }
+            if firstTranslationReadySeconds == nil,
+               normalizedWords(update.output.text).count >= 3 {
+                firstTranslationReadySeconds = elapsed
             }
             if update.isFinal {
                 finals.append(update.output.text)
+            } else {
+                partialCount += 1
             }
         }
         let wall = seconds(startedAt.duration(to: clock.now))
@@ -77,10 +122,15 @@ enum ASRBenchmarkMain {
         let lag = realtime ? wall - duration : wall
         print(
             String(
-                format: "apple first=%.3fs wall=%.3fs endLag=%.3fs text=%@",
+                format: "apple first=%.3fs translationReady=%.3fs wall=%.3fs "
+                    + "endLag=%.3fs partials=%d finals=%d firstText=%@ text=%@",
                 firstResultSeconds ?? -1,
+                firstTranslationReadySeconds ?? -1,
                 wall,
                 lag,
+                partialCount,
+                finals.count,
+                firstResultText ?? "",
                 text
             )
         )
@@ -172,6 +222,27 @@ enum ASRBenchmarkMain {
         return Array(
             UnsafeBufferPointer(start: channel, count: Int(output.frameLength))
         )
+    }
+
+    private static func repeatedSamples(
+        _ samples: [Float],
+        count: Int,
+        gapSeconds: Double
+    ) -> [Float] {
+        guard count > 1 else { return samples }
+        let gap = [Float](
+            repeating: 0,
+            count: Int((gapSeconds * 16_000).rounded())
+        )
+        var result: [Float] = []
+        result.reserveCapacity(samples.count * count + gap.count * (count - 1))
+        for index in 0..<count {
+            if index > 0 {
+                result.append(contentsOf: gap)
+            }
+            result.append(contentsOf: samples)
+        }
+        return result
     }
 
     private static func wordErrorRate(_ reference: String, _ hypothesis: String) -> Double {
