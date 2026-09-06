@@ -9,6 +9,14 @@ struct StabilizedCaptionText: Equatable, Sendable {
     }
 }
 
+/// The frozen reading surface is deliberately not the authoritative transcript.
+/// History and final translation must use recognizedText, including corrections
+/// to a prefix which was already frozen while the speaker was talking.
+struct FinalizedCaptionText: Equatable, Sendable {
+    let presentation: StabilizedCaptionText
+    let recognizedText: String
+}
+
 /// Turns Whisper's repeatedly rewritten snapshots into a monotonic reading
 /// surface. Text is committed only after it agrees across two snapshots, and
 /// a small trailing window remains editable so Whisper can still correct the
@@ -20,6 +28,7 @@ struct CaptionTextStabilizer: Sendable {
     private var committedTokenCount = 0
     private var committedKeys: [String] = []
     private var committedText = ""
+    private var previousPresentation = StabilizedCaptionText(stable: "", draft: "")
 
     mutating func update(
         text: String,
@@ -34,9 +43,29 @@ struct CaptionTextStabilizer: Sendable {
         let tokens = Self.tokens(in: text)
         let hasIndependentEvidence = evidenceEndSample == nil
             || evidenceEndSample != previousEvidenceEndSample
+        let holdback = language == .chinese ? 4 : 2
+        let rewritesCommittedPrefix = !committedKeys.isEmpty && !committedKeys.elementsEqual(
+            tokens.prefix(committedKeys.count).map(\.key)
+        )
+        if rewritesCommittedPrefix {
+            let agreementCount = Self.commonPrefixCount(previousTokens, tokens)
+            let confirmedCount = max(0, agreementCount - holdback)
+            let requiredConfirmation = min(committedTokenCount, language == .chinese ? 4 : 2)
+            if hasIndependentEvidence, confirmedCount >= requiredConfirmation {
+                // A correction confirmed by two independent audio observations
+                // may replace an earlier mistake once. Never concatenate a
+                // conflicting new hypothesis onto a now-incorrect old prefix.
+                committedTokenCount = 0
+                committedKeys = []
+                committedText = ""
+            } else {
+                previousTokens = tokens
+                previousEvidenceEndSample = evidenceEndSample
+                return previousPresentation
+            }
+        }
         if !previousTokens.isEmpty, hasIndependentEvidence {
             let agreementCount = Self.commonPrefixCount(previousTokens, tokens)
-            let holdback = language == .chinese ? 4 : 2
             let targetCount = max(
                 committedTokenCount,
                 agreementCount - min(holdback, agreementCount)
@@ -50,13 +79,14 @@ struct CaptionTextStabilizer: Sendable {
 
         previousTokens = tokens
         previousEvidenceEndSample = evidenceEndSample
-        return presentation(for: text, tokens: tokens)
+        previousPresentation = presentation(for: text, tokens: tokens)
+        return previousPresentation
     }
 
     mutating func finalize(
         text: String,
         segmentStartSample: Int64
-    ) -> StabilizedCaptionText {
+    ) -> FinalizedCaptionText {
         if self.segmentStartSample != segmentStartSample {
             reset(for: segmentStartSample)
         }
@@ -73,9 +103,9 @@ struct CaptionTextStabilizer: Sendable {
         committedKeys = tokens.map(\.key)
         previousTokens = tokens
 
-        return StabilizedCaptionText(
-            stable: committedText,
-            draft: ""
+        return FinalizedCaptionText(
+            presentation: StabilizedCaptionText(stable: committedText, draft: ""),
+            recognizedText: text.trimmingCharacters(in: .whitespacesAndNewlines)
         )
     }
 
@@ -86,6 +116,7 @@ struct CaptionTextStabilizer: Sendable {
         committedTokenCount = 0
         committedKeys = []
         committedText = ""
+        previousPresentation = StabilizedCaptionText(stable: "", draft: "")
     }
 
     static func semanticUnitCount(in text: String) -> Int {
@@ -281,13 +312,26 @@ struct CaptionTextStabilizer: Sendable {
 }
 
 enum PartialTranslationPolicy {
+    /// Bounds scheduling delay for a changed conservative prefix, not ASR,
+    /// translation inference, or end-to-end caption latency.
+    static let maximumWait: TimeInterval = 0.6
+
+    /// Do not show a misleading translation of a lone subword/character such
+    /// as Chinese "大" → "big" while the recognizer is still saying "大家好".
+    /// Short complete utterances still go straight through final translation.
+    static func hasEnoughContext(_ text: String, language: SpokenLanguage) -> Bool {
+        CaptionTextStabilizer.semanticUnitCount(in: text) >= (language == .chinese ? 4 : 2)
+    }
+
     static func shouldRequest(
         previousText: String,
         stableText: String,
-        language: SpokenLanguage
+        language: SpokenLanguage,
+        elapsedSinceLastRequest: TimeInterval = 0
     ) -> Bool {
         let stable = stableText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !stable.isEmpty, stable != previousText else { return false }
+        guard hasEnoughContext(stable, language: language),
+              stable != previousText else { return false }
 
         let previousCount = CaptionTextStabilizer.semanticUnitCount(in: previousText)
         let currentCount = CaptionTextStabilizer.semanticUnitCount(in: stable)
@@ -302,5 +346,6 @@ enum PartialTranslationPolicy {
             || rewritesRequestedPrefix
             || currentCount - previousCount >= requiredGrowth
             || endsPhrase
+            || elapsedSinceLastRequest >= maximumWait
     }
 }

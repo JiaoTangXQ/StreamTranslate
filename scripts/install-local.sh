@@ -8,35 +8,42 @@ signing_name="StreamTranslate Local Code Signing"
 destination="/Applications/StreamTranslate.app"
 backup="/Applications/StreamTranslate.app.previous"
 
-"$script_dir/setup-local-signing.sh"
+cd "$project_root"
+if ! xcodebuild -version >/dev/null 2>&1; then
+    "$script_dir/build-app.sh"
+    built_app="$project_root/build/StreamTranslate.app"
+else
+    if [[ ! -d StreamTranslate.xcodeproj ]]; then
+        xcodegen generate
+    fi
+    xcodebuild build \
+        -project StreamTranslate.xcodeproj \
+        -scheme StreamTranslate \
+        -destination 'platform=macOS' \
+        -configuration Release
 
+    build_settings=$(xcodebuild -showBuildSettings \
+        -project StreamTranslate.xcodeproj \
+        -scheme StreamTranslate \
+        -destination 'platform=macOS' \
+        -configuration Release)
+    target_build_dir=$(print -r -- "$build_settings" \
+        | awk -F ' = ' '/^[[:space:]]*TARGET_BUILD_DIR = / { print $2; exit }')
+    wrapper_name=$(print -r -- "$build_settings" \
+        | awk -F ' = ' '/^[[:space:]]*WRAPPER_NAME = / { print $2; exit }')
+    built_app="$target_build_dir/$wrapper_name"
+fi
+
+if [[ ! -d "$built_app" ]]; then
+    echo "Built application not found: $built_app" >&2
+    exit 1
+fi
+
+"$script_dir/setup-local-signing.sh"
 identity_hash=$(security find-identity -v -p codesigning 2>/dev/null \
     | awk -v needle="\"$signing_name\"" 'index($0, needle) { print $2; exit }')
 if [[ -z "$identity_hash" ]]; then
     echo "Missing valid signing identity: $signing_name" >&2
-    exit 1
-fi
-
-cd "$project_root"
-xcodebuild build \
-    -project StreamTranslate.xcodeproj \
-    -scheme StreamTranslate \
-    -destination 'platform=macOS' \
-    -configuration Release
-
-build_settings=$(xcodebuild -showBuildSettings \
-    -project StreamTranslate.xcodeproj \
-    -scheme StreamTranslate \
-    -destination 'platform=macOS' \
-    -configuration Release)
-target_build_dir=$(print -r -- "$build_settings" \
-    | awk -F ' = ' '/^[[:space:]]*TARGET_BUILD_DIR = / { print $2; exit }')
-wrapper_name=$(print -r -- "$build_settings" \
-    | awk -F ' = ' '/^[[:space:]]*WRAPPER_NAME = / { print $2; exit }')
-built_app="$target_build_dir/$wrapper_name"
-
-if [[ ! -d "$built_app" ]]; then
-    echo "Built application not found: $built_app" >&2
     exit 1
 fi
 
@@ -71,7 +78,10 @@ if pgrep -x StreamTranslate >/dev/null; then
 fi
 
 if [[ -e "$backup" ]]; then
-    find "$backup" -depth -delete
+    # Keep earlier rollback copies instead of silently deleting the last one.
+    mkdir -p "$project_root/build/app-backups"
+    archived_backup=$(mktemp -d "$project_root/build/app-backups/install.XXXXXX")
+    mv "$backup" "$archived_backup/StreamTranslate.app"
 fi
 if [[ -e "$destination" ]]; then
     mv "$destination" "$backup"
@@ -99,10 +109,9 @@ if ! pgrep -x StreamTranslate >/dev/null; then
     exit 1
 fi
 
-if [[ -e "$backup" ]]; then
-    find "$backup" -depth -delete
-fi
-
 trap cleanup EXIT
 echo "Installed signed StreamTranslate at $destination"
+if [[ -e "$backup" ]]; then
+    echo "Previous version retained at $backup"
+fi
 print -r -- "$designated_requirement"

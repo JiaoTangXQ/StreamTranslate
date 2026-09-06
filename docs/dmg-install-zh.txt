@@ -1,0 +1,38 @@
+StreamTranslate 1.2.1 — Mac 完整模型版
+
+安装
+1. 将 StreamTranslate.app 拖到旁边的 Applications（应用程序）文件夹。
+2. 等待复制完成，推出此磁盘映像，再从“应用程序”打开 StreamTranslate。
+3. 这是菜单栏 App：在屏幕顶部寻找字幕气泡图标，通过 Settings 设置、Start 开始。
+
+要求
+Apple 芯片（M 系列），macOS 26 或更高；建议 16GB 或更多内存。
+不支持 Intel Mac 或 macOS 15 及更早版本。
+App 约 2.5GB。建议至少预留 8GB 可用空间供安装、系统语言资源及运行使用。
+已包含 Qwen3-ASR 0.6B Q8、Hy-MT2 1.8B Q4 和原生 Metal 运行时。
+不需要 Python、Homebrew、NVIDIA 显卡，也不依赖原作者的外置硬盘。
+
+首次使用
+允许系统下载 Apple 语音识别与翻译语言资源；此步骤需要联网。
+英文转中文：选择 English / Apple Speech English；中文转英文：选择中文 / Apple Speech 中文。
+System Audio 用于翻译电脑正在播放的音频；Microphone 用于身边讲话。
+开始时按系统提示授权屏幕与系统音频录制或麦克风；如提示重启 App，请重启。
+两个增强开关默认启用，模型后台准备期间先提供 Apple 字幕，内存紧张时自动回退。
+“自动”语言识别使用可另行下载的 Whisper 模型；Nemotron 属于另装的可选后端，未随本包提供。
+安装后不需要一直打开 DMG。不要直接在磁盘映像里运行 App。
+
+安全提示
+当前本地分发版没有 Apple Developer ID 签名和 Apple 公证，macOS 可能阻止首次打开。
+仅在你信任发送者、确认文件来源后，依据 macOS“隐私与安全性”的提示处理。
+不要为此全局关闭 Gatekeeper 或其他系统安全保护；单位管理的 Mac 可能不允许打开。
+要像正式公证软件一样通过首次安全检查，需要开发者后续提供 Developer ID 签名并公证的版本。
+
+隐私与准确性
+语言资源下载完成后，默认识别与翻译在本机执行，不上传音频。
+Diagnostics 默认关闭；开启后会保存录音和详细诊断。普通日志仍可能包含识别文字和译文。
+本机日志：~/Library/Logs/StreamTranslate.log
+翻译可能出错；关键数字、否定、专有名词及重要用途请人工核对。
+
+许可
+App 内 Contents/Resources/Licenses 包含第三方许可、模型来源和修改说明。
+本 DMG 不包含用户录音、日志、偏好设置或签名私钥。

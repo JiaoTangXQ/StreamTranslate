@@ -13,6 +13,8 @@
     <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
+    <key>CFBundleIconFile</key>
+    <string>StreamTranslate.icns</string>
     <key>CFBundleName</key>
     <string>$(PRODUCT_NAME)</string>
     <key>CFBundlePackageType</key>
@@ -23,11 +25,17 @@
     <string>$(CURRENT_PROJECT_VERSION)</string>
     <key>LSUIElement</key>
     <true/>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>StreamTranslate connects to your paired iPhone to display private live subtitles. Only text is sent over an authenticated encrypted connection.</string>
+    <key>NSBonjourServices</key>
+    <array><string>_stcaption._tcp</string></array>
     <key>NSScreenCaptureUsageDescription</key>
     <string>StreamTranslate needs screen recording permission to capture system audio for real-time transcription.</string>
+    <key>NSRemovableVolumesUsageDescription</key>
+    <string>StreamTranslate needs access to the external disk containing your downloaded local speech and translation models.</string>
     <key>NSMicrophoneUsageDescription</key>
-    <string>StreamTranslate uses the microphone to transcribe nearby English speech into bilingual captions.</string>
+    <string>StreamTranslate uses the microphone to transcribe nearby English or Chinese speech into bilingual captions.</string>
     <key>NSSpeechRecognitionUsageDescription</key>
-    <string>StreamTranslate uses on-device speech recognition to create live English captions.</string>
+    <string>StreamTranslate uses on-device speech recognition to create live English and Chinese captions.</string>
 </dict>
 </plist>

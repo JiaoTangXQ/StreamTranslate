@@ -15,7 +15,9 @@ struct FloatingPanelResizeEdges: OptionSet, Equatable {
 }
 
 final class FloatingPanel: NSPanel, NSWindowDelegate {
-    /// Keeps the visible caption edge inside the window-server event region.
+    /// Reserves a painted resize rim inside the window-server event region.
+    /// FloatingCaptionView must paint this area; transparent padding is not
+    /// a mouse target, even if resizeEdges reports that it would be resizable.
     /// A nonactivating panel can lose its native outer resize border after a
     /// Dock restore, while points inside the content region remain reliable.
     static let resizeInteractionInset: CGFloat = 6
@@ -51,7 +53,7 @@ final class FloatingPanel: NSPanel, NSWindowDelegate {
         hidesOnDeactivate = false
         isReleasedWhenClosed = false
         acceptsMouseMovedEvents = true
-        minSize = NSSize(width: 300, height: 104)
+        minSize = NSSize(width: 300, height: 144)
         delegate = self
     }
 

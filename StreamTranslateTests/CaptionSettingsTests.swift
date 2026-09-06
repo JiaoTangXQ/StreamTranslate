@@ -1,4 +1,15 @@
 import Testing
+
+@Test func settingsInterfaceUsesConsistentChineseLabels() {
+    #expect(AudioInputSource.microphone.displayName == "麦克风")
+    #expect(AudioInputSource.systemAudio.displayName == "电脑音频")
+    #expect(RecognitionLanguageMode.english.displayName == "英文")
+    #expect(SpeechDetectionSensitivity.automatic.displayName == "自动")
+    #expect(SettingsPage.allCases.map(\.title) == ["声音与语言", "字幕外观", "识别与翻译", "隐私与诊断"])
+    // Labels must not change persisted values or engine selection identifiers.
+    #expect(AudioInputSource.microphone.rawValue == "microphone")
+    #expect(RecognitionLanguageMode.english.rawValue == "english")
+}
 import Foundation
 @testable import StreamTranslate
 
@@ -168,18 +179,18 @@ func makeTestDefaults(
     defaults.removeObject(forKey: "recognitionLanguageMode")
 }
 
-@Test @MainActor func nonEnglishModeSelectsWhisperFallback() {
+@Test @MainActor func chineseModeSelectsAppleChinese() {
     let defaults = makeTestDefaults()
     let settings = CaptionSettings(defaults: defaults)
     #expect(settings.selectedModel.backend == .appleSpeech)
 
     settings.recognitionLanguageMode = .chinese
 
-    #expect(settings.selectedModel.id == ASRModel.whisperFallback.id)
+    #expect(settings.selectedModel.id == "apple-speech-transcriber-zh")
     #expect(settings.recognitionLanguageMode == .chinese)
 }
 
-@Test @MainActor func nonEnglishModeSwitchesNemotronToWhisperFallback() {
+@Test @MainActor func chineseModeSwitchesNemotronToAppleChinese() {
     let defaults = makeTestDefaults()
     defaults.set(
         "nvidia-nemotron-streaming-en-0.6b",
@@ -193,8 +204,51 @@ func makeTestDefaults(
 
     settings.recognitionLanguageMode = .chinese
 
-    #expect(settings.selectedModel.id == ASRModel.whisperFallback.id)
+    #expect(settings.selectedModel.id == "apple-speech-transcriber-zh")
     #expect(settings.recognitionLanguageMode == .chinese)
+}
+
+@Test @MainActor func automaticModeStillSelectsWhisperFallback() {
+    let settings = CaptionSettings(defaults: makeTestDefaults())
+    settings.recognitionLanguageMode = .chinese
+    settings.recognitionLanguageMode = .automatic
+    #expect(settings.selectedModel.id == ASRModel.whisperFallback.id)
+    #expect(settings.recognitionLanguageMode == .automatic)
+}
+
+@Test @MainActor func selectingChineseAppleModelForcesChineseModeAndPersists() {
+    let defaults = makeTestDefaults()
+    let settings = CaptionSettings(defaults: defaults)
+    settings.selectedModelId = "apple-speech-transcriber-zh"
+    #expect(settings.recognitionLanguageMode == .chinese)
+    let restored = CaptionSettings(defaults: defaults)
+    #expect(restored.recognitionLanguageMode == .chinese)
+    #expect(restored.selectedModelId == "apple-speech-transcriber-zh")
+    settings.recognitionLanguageMode = .english
+    #expect(settings.selectedModelId == ASRModel.defaultModel.id)
+}
+
+@Test @MainActor func migrationPreservesChineseAndExplicitWhisperSelection() {
+    let defaults = makeTestDefaults()
+    defaults.set("chinese", forKey: "recognitionLanguageMode")
+    defaults.set(ASRModel.defaultModel.id, forKey: "selectedModelId")
+    let restored = CaptionSettings(defaults: defaults)
+    #expect(restored.recognitionLanguageMode == .chinese)
+    #expect(restored.selectedModelId == "apple-speech-transcriber-zh")
+    restored.selectedModelId = ASRModel.whisperFallback.id
+    let whisper = CaptionSettings(defaults: defaults)
+    #expect(whisper.selectedModelId == ASRModel.whisperFallback.id)
+    #expect(whisper.recognitionLanguageMode == .chinese)
+}
+
+@Test func nativeModelLanguageCapabilitiesAreExplicit() {
+    let chinese = ASRModel.recommended(for: .chinese)
+    #expect(chinese.backend == .appleSpeech)
+    #expect(chinese.usesNativeStreaming)
+    #expect(!chinese.supportsOnlyEnglish)
+    #expect(chinese.supports(.chinese))
+    #expect(!chinese.supports(.automatic))
+    #expect(!chinese.supports(.english))
 }
 
 @Test @MainActor func selectingAppleStreamingForcesEnglishMode() {

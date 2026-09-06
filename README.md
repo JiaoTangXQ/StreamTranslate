@@ -1,35 +1,78 @@
 # StreamTranslate
 
-StreamTranslate is a local macOS subtitle overlay for English↔Chinese meetings and media. Its default English path uses Apple's continuous on-device speech transcriber. An optional Nemotron Metal backend lowers English subtitle latency on the tested M4. Chinese and automatic-language modes remain available through WhisperKit.
+## Latest update · 1.6.0
+
+- Chinese dark settings with four navigation sections, live font-size preview and a resizable window.
+- New black/white/red macOS app icon, included in source builds and future DMGs.
+- Private phone captions over a trusted LAN or an explicitly enabled HTTPS relay; audio and models stay on the Mac.
+- Home Screen authorization recovery, saved-link handling and in-place re-pairing for the remote reader.
+
+See [settings redesign](docs/settings-redesign-1.6.0.md),
+[remote phone setup](docs/remote-companion-1.5.0.md) and
+[Home Screen recovery](docs/bookmark-recovery-1.5.1.md).
+Relay deployment files contain **example host/account values**, not a provisioned public service.
+Model weights, credentials, machine provisioning and generated release binaries are not in this repository.
+
+StreamTranslate is a local macOS subtitle overlay for English↔Chinese meetings and media. Fixed English and Mandarin have Apple's continuous on-device speech transcriber. An optional Nemotron Metal backend offers another English streaming path; latency advantages vary by input and pipeline. WhisperKit remains available for automatic-language detection and manual multilingual recognition.
 
 ## Current behavior
 
 - English speech → streaming English transcript → simplified or Taiwan traditional Chinese
 - Apple SpeechAnalyzer and optional Nemotron both process each audio chunk once and preserve recognizer state across long utterances
-- A confirmed prefix stays fixed while only the dim live edge may change
+- A confirmed prefix stays fixed during speech; the authoritative final transcript may correct it at the sentence boundary
 - A conservative prefix starts draft translation before the whole sentence is final
+- Changed eligible prefixes have a 600 ms scheduling deadline, without translating isolated English words or fewer than four Chinese characters
 - Final source text enters transcript history immediately; translation updates the same caption ID later
 - Final translations use Apple Translation's identified batch API, so slow or out-of-order responses cannot overwrite another caption
 - Stopping native streaming recognition closes the audio stream and waits for final words and queued translations before ending the session
 - Whisper Small and Large-v3 Turbo remain selectable for Chinese, automatic language detection, and comparison
 - Microphone and ScreenCaptureKit watchdogs rebuild stalled capture after about three seconds
 - Audio, speech recognition, and translation stay on the Mac
+- Optional Qwen source review and bidirectional Hy-MT final refinement update the same caption; guarded revisions, timeouts and memory-pressure fallback retain the fast system path
 
-Network access is needed only when macOS installs missing Apple language assets, WhisperKit downloads an optional Whisper model, or the explicit Nemotron installer downloads its pinned runtime and model.
+The transcription/translation pipeline uses network access to install missing language assets or optional models/runtimes. Enabling phone subtitles also requires a LAN connection or, for the optional remote relay, Internet access. Audio recognition and translation processing remain local.
 
 ## Requirements
 
 - Apple Silicon Mac running macOS 26.0 or later
-- Xcode 26.0 or later for source builds
+- Xcode 26.0 or later, or Command Line Tools with Swift 6 and the macOS 26 SDK, for source builds
 - Microphone permission for nearby speech
 - Screen Recording permission for System Audio mode
 - English and Chinese Apple Translation language assets
 - About 700 MB free space per optional Whisper model and compiled Core ML cache
 - About 1 GB free disk space and about 1.05 GB process RSS for optional Nemotron
 
-The tested machine is an Apple M4 with 16 GB unified memory on macOS 26.2. The default Apple Speech + Apple Translation path avoids keeping an additional 1.8B translation model resident.
+The latest enhancement tests use an Apple M4 with 16 GB unified memory on macOS 26.4. Apple Speech + Apple Translation is the fast base path. Installed optional Qwen 0.6B / Hy-MT 1.8B models load during capture and release on stop or memory pressure. They are separate native Metal processes; their memory is not included in the app's own RSS. macOS 26.4 uses the low-latency Translation strategy; earlier supported systems retain their existing strategy.
 
 ## Build and run
+
+For drag-to-Applications distribution, build the **full-model DMG** with
+`zsh scripts/build-dmg.sh /path/to/output-directory` (10 GiB staging space).
+It includes the pinned Qwen / Hy-MT weights and native runtimes inside the App,
+with no development-machine model symlinks. See [DMG distribution](docs/dmg-distribution.md)
+and [recipient installation instructions](docs/dmg-install-zh.txt).
+The default locally signed build is **not Apple-notarized**; a Developer ID
+certificate and notarization are required for the normal trusted distribution workflow.
+Source/local builds below remain small and use separately installed models.
+
+To build and install with either Xcode or Command Line Tools:
+
+```bash
+./scripts/install-local.sh
+```
+
+This builds a Release app, signs it with a persistent local identity, installs it
+at `/Applications/StreamTranslate.app`, and launches it. macOS may ask you to
+trust the local signing certificate. With Command Line Tools only, the installer
+uses the Swift package in `Package.swift`; no Xcode download is needed. To build
+the unsigned app bundle without installing, run `./scripts/build-app.sh` (output:
+`build/StreamTranslate.app`). The unit test suite additionally needs Swift Testing
+(bundled with full Xcode); Command Line Tools alone can build the app but may not
+provide the `Testing` module.
+
+The installer retains the previous signed app at `/Applications/StreamTranslate.app.previous` for rollback. Older rollback copies are archived under `build/app-backups/` on subsequent installs.
+
+For the Xcode workflow:
 
 ```bash
 brew install xcodegen
@@ -58,7 +101,7 @@ For repeated local installation into `/Applications`, use the stable local signi
 
 1. Select **System Audio** for calls or media playing on the Mac; select **Microphone** for nearby speakers.
 2. Keep recognition language on **English**.
-3. On the tested M4, select **最低延迟（本机安装） / Nemotron Streaming English** after installing it. Keep **英译中流式 / Apple Speech English** when minimizing memory or avoiding an optional model installation.
+3. Select **英译中流式 / Apple Speech English** for the tested low-memory enhancement combination. **英文流式 Metal（本机安装） / Nemotron Streaming English** remains an optional comparison, not a universal first-translation speed winner.
 4. Add names, product names, abbreviations, and technical terms to **Vocabulary**, separated by commas or new lines.
 5. Start from the menu bar or press `Cmd+Shift+T`.
 
@@ -72,7 +115,7 @@ Install the pinned official NeMo-Speech.cpp Metal runtime and English Q8 model:
 
 The installer supports Apple Silicon only, verifies both SHA-256 checksums, and stores assets under `~/Library/Application Support/StreamTranslate/Nemotron`. The runtime uses the M4 GPU through Metal; it does not use Core ML or the Neural Engine. The measured cold preload was about seven seconds. The app keeps Apple Speech as the installation-free default and reports a direct installation error if Nemotron assets are absent.
 
-Use **Whisper Small** for automatic/Chinese recognition or an English accuracy comparison. Use **Large-v3 Turbo** only when its higher per-pass latency is acceptable. Selecting automatic or Chinese mode switches away from the English-only Apple backend.
+For fixed Mandarin, select **中译英流式 / Apple Speech 中文**. Switching a fixed English native model to Chinese selects this native Chinese profile. Selecting automatic mode switches incompatible native models to **Whisper Small**. Explicitly selected Whisper models are preserved when changing languages. **Large-v3 Turbo** remains optional when its higher per-pass latency is acceptable. If Apple speech assets are unavailable or recognition is unsuitable for the content, manually select Whisper as the fallback.
 
 ## Data flow
 
@@ -81,19 +124,23 @@ Microphone / System Audio → 16 kHz mono chunks
     ├─ fixed English + Nemotron model
     │    → NeMo-Speech.cpp Metal streaming state
     │    → partial/final English results
-    ├─ fixed English + Apple model
+    ├─ fixed English or Mandarin + matching Apple model
     │    → SpeechAnalyzer streaming state
-    │    → volatile/final English ranges
-    └─ automatic or Chinese + Whisper model
+    │    → volatile/final ranges in the selected language
+    └─ automatic or manually selected Whisper model
          → adaptive endpointing
          → coalesced snapshot recognition
     → frozen prefix + editable suffix
     → latest-only draft translation
-    → ID-matched batch final translation
+    → authoritative final source → ID-matched batch final translation
     → floating subtitles + transcript history
 ```
 
 For a first partial, translation may use all but the last two English words. This prefix is not displayed as frozen until independent audio evidence confirms it. A 30 ms debounce merges groups of subword hypotheses emitted in one callback burst.
+
+Drafts need at least two English words or four Chinese characters. A changed eligible prefix waits at most 600 ms in the scheduling policy, even if no further ASR callback arrives. Its deadline is anchored to the previous request; if already elapsed, the new candidate is submitted immediately. Newer pending text does not extend the deadline. This is a scheduling bound, not a promise of 600 ms end-to-end latency. Finalization, clear-history and segment/language changes cancel obsolete deadlines.
+
+The 1.1 implementation and local measurements are documented in [the enhancement verification report](docs/enhancement-1.1-verification-2026-09-05.md). Open Settings using the menu-bar action or the standard macOS **⌘,** shortcut.
 
 ## Verification
 
@@ -108,7 +155,20 @@ xcodebuild test \
   CODE_SIGNING_ALLOWED=NO
 ```
 
-The current suite contains 193 tests.
+The current suite contains 213 tests. On a CLT-only Mac, run the core test bodies using the explicit sequential assertion adapter:
+
+```bash
+python3 Tools/run_portable_tests.py
+```
+
+This is not the Swift Testing runner. It runs 165 core test bodies and reports the four excluded UI/shared-log files (48 tests); full Xcode tests and real UI/capture checks remain separate.
+
+To exercise the production Chinese recognizer, caption state and installed translation assets without capturing live audio:
+
+```bash
+python3 Tools/build_local_tool.py Tools/EnhancementReplayMain.swift build/enhancement-replay/EnhancementReplay
+build/enhancement-replay/EnhancementReplay /path/to/16k-mono.wav zh
+```
 
 Build the replayable ASR benchmark:
 
@@ -181,20 +241,81 @@ StreamTranslate/
 ├── ViewModels/             pipeline scheduling and UI state
 ├── Views/ and Windows/     subtitle and settings UI
 Tools/                      ASR, translation, and session-analysis benchmarks
-StreamTranslateTests/       193 tests
+StreamTranslateTests/       unit and integration tests
 ```
 
 `project.yml` is the source of truth for the generated Xcode project.
 
 ## Known limits
 
-- The Apple and Nemotron streaming backends are fixed to English. Chinese and automatic routing use Whisper.
+- Apple streaming uses a fixed English or Mandarin locale, not automatic code-switching. Nemotron remains English-only; automatic routing uses Whisper.
 - Nemotron is an optional Metal backend with about 1.05 GB measured process RSS versus 39 MB maximum RSS for the five-minute Apple benchmark. Semantic-normalized WER tied Apple on the five-voice synthetic set; the current evidence supports lower latency, not a general accuracy claim.
 - Overlapping speakers are mixed into one audio stream.
 - Vocabulary is recognition context, not a bilingual translation glossary.
-- Apple Translation on macOS 26.2 has no public glossary or low-latency strategy API. The low-latency strategy first appears in macOS 26.4.
+- Apple Translation does not receive a bilingual glossary. On macOS 26.4 the app explicitly requests low latency. Optional native Hy-MT2 refinement and Qwen source review require separately installed runtimes/weights. This machine uses an external SSD for those assets; disconnecting it retains the system path. See [local use](docs/local-use-zh.md) and [1.2.1 verification](docs/refinement-1.2.1-verification-2026-09-05.md). Quality guards are conservative checks, not a guarantee that every refinement is more accurate.
 - A different ad-hoc app signature can require Screen Recording and Microphone permission again; use `scripts/install-local.sh` for repeated installations.
 - Full System Audio validation requires the user-granted Screen Recording permission and cannot be completed by a test process after macOS denies that prompt.
+
+## Reading-first desktop controls (1.4.0)
+
+Move the pointer over captions to reveal source, language, start/stop, phone,
+settings and minimize controls. They fade after inactivity; interaction keeps
+them available. Empty/paused views provide contextual feedback. Compact windows
+offer the same actions with concise icons and accessible labels.
+
+Quick source/language changes coordinate stop, configuration/model preparation
+and optional restart. Idle selection never starts recording; stop cancels a
+pending automatic resume. Transcript history and the phone conversation are
+retained during a quick switch; actual audio may have a gap. Real permissions,
+device switching and accessibility still require manual acceptance.
+See [interaction rationale](docs/interaction-design-2026-09-06.md).
+
+## iPhone private subtitle companion (1.3.0 development preview)
+
+### No-signing web reader (Mac 1.3.2 / build 13)
+
+For a trusted LAN, the Mac now offers **Quick connect → scan with iPhone Camera
+→ read in Safari**, without installing an app or certificate. The Mac explicitly
+asks for plaintext-HTTP consent; it never silently downgrades existing HTTPS.
+Port 18444 uses an automatically selected LAN IP, one-use QR pairing and a
+separate 12-hour, server-memory-only browser authorization. HTTP does not protect
+captions or credentials from network attackers and cannot keep the phone awake.
+Do not use this mode for public Wi-Fi or sensitive meetings. Service restart
+requires a new scan; browser/network reconnect can resume while authorization
+remains valid. WeChat and physical iPhone acceptance are not yet verified.
+
+The advanced encrypted option serves a private HTTPS reader on port 18443. On an
+iPhone, install the Mac-generated public certificate profile and explicitly
+trust it, pair by a one-time QR/code, then add the page to the Home Screen.
+No developer membership, weekly app re-signing, cloud server or domain purchase
+is required. The certificate lasts one year; browser pairing lasts 90 days.
+This is a LAN-only browser route, not the native Apple peer-to-peer path.
+
+The listener rejects public source addresses, mismatched Host/Origin, ambiguous
+HTTP framing and unauthenticated subtitle access. It uses TLS 1.3, HttpOnly
+Secure cookies, bounded snapshot/delta SSE, heartbeats and reconnect snapshots.
+Captions are rendered as text and kept out of browser persistent storage. No
+service worker stores transcripts. Root signing keys are not persisted; only
+the hostname-bound server leaf key is retained in the Mac keychain.
+
+See [Chinese setup instructions](docs/web-companion-use-zh.md) and
+[verification and release boundaries](docs/web-companion-verification.md).
+The native iPhone implementation below remains available.
+
+The Mac engine now supports window-independent translation sessions and a
+persisted phone-only display mode. A native iPhone target, `StreamTranslatePhone`,
+receives text over certificate-pinned TLS 1.3 with one-time pairing, revision-aware
+updates, bounded queues and reconnect snapshots. Network discovery/serving is off
+until enabled. Apple peer-to-peer Wi-Fi is opt-in and experimental.
+
+This is **not yet a verified iPhone release**. Mac builds, protocol checks,
+loopback TLS tests and unsigned native arm64/iPhoneOS builds pass. Five native
+XCTest UI tests pass on iOS 26.5 Simulator; synthetic Bonjour/TLS captions,
+relaunch recovery, session clearing and offline display were also checked in
+the actual simulator app. See [no-phone verification](docs/phone-simulator-verification.md).
+Device signing and wireless/lock-screen acceptance still require a configured
+signing team and an actual iPhone. QUIC and automatic LAN/P2P switching
+remain deferred until measured. See [setup and verification](docs/companion-development-status.md).
 
 ## License
 

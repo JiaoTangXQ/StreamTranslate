@@ -1,0 +1,43 @@
+StreamTranslate distribution notices — 1.2.1 build 10
+
+StreamTranslate: MIT, Copyright (c) 2025 Jinsong Zhou.
+See StreamTranslate-MIT.txt. Local modifications add native Qwen review,
+Hy-MT refinement, bounded subtitle scheduling, integrity checks, and bundled
+model resolution. These modifications are not endorsed by upstream authors.
+
+Qwen3-ASR-0.6B: Qwen, Apache-2.0.
+https://huggingface.co/Qwen/Qwen3-ASR-0.6B
+Original model revision: 5eb144179a02acc5e5ba31e748d22b0cf3e303b0
+Modification: converted to GGUF and quantized to Q8_0 locally using qwen3-asr.cpp.
+Bundled SHA-256: d81d497b25508449b4bb511b343aee663405d28132d8dccfd5f29a1cceef77d3
+See Qwen-model-card.md and Apache-2.0.txt for attribution and terms.
+
+Qwen native runtime: https://github.com/predict-woo/qwen3-asr.cpp
+Revision: 6dcc586e5073fd6e85ee5728e75f0903d6c70c6c
+GGML revision: 9be313313c8ecb9488911bd64550190e3ed80f38
+See qwen3-asr-cpp.txt and ggml.txt. Runtime built for Apple Silicon/Metal,
+with apple-m1 CPU baseline and GGML_NATIVE=OFF (not host-native M4 instructions);
+StreamTranslate adds a separate bounded stdio QwenHelper and relocates dylibs.
+
+Hy-MT2-1.8B-Q4_K_M: Tencent, Apache-2.0; official quantized weights, unmodified.
+https://huggingface.co/tencent/Hy-MT2-1.8B-GGUF
+Revision: 1cd5208700acedef4ef93019b6cfc148b8522d45
+Bundled SHA-256: dc5f44fcf1fa496ee7ad725982c0c8c553a4de00259b53af84c4b89fb0c06699
+See HyMT-Apache-2.0.txt and HyMT-model-card.md.
+
+llama.cpp native runtime: https://github.com/ggml-org/llama.cpp
+Official macOS arm64 release b10809, commit 5266f24da. See llama-cpp-MIT.txt.
+Native binaries re-signed for this distribution; model inference uses Metal.
+Additional upstream vendored notices are included as llama-vendor-*.txt.
+BoringSSL release dependency: 0.20260903.0; see BoringSSL-LICENSE.txt.
+
+Argmax OSS Swift / WhisperKit: MIT.
+https://github.com/argmaxinc/argmax-oss-swift
+Revision: 1e2a163736dfa5a198e637ae44c114e1c6d5cc2d (1.1.0).
+See Argmax-MIT.txt and Argmax-NOTICES.txt (includes Apache-licensed derived code).
+Swift Argument Parser: https://github.com/apple/swift-argument-parser
+See Swift-Argument-Parser-LICENSE.txt.
+
+Apple Speech and Translation frameworks are provided by macOS, not redistributed
+as independent software here. Their language assets are downloaded by macOS.
+No Nemotron, Whisper, Qwen 1.7B, Hy-MT 7B or TranslateGemma weights are included.

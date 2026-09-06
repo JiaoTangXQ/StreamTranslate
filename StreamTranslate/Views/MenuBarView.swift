@@ -6,6 +6,8 @@ struct MenuBarView: View {
     var onToggleCapture: () -> Void
     var onOpenTranscript: () -> Void
     var onOpenSettings: () -> Void
+    var onOpenPhone: () -> Void
+    var onTogglePhoneOnly: () -> Void
     var onQuit: () -> Void
 
     var body: some View {
@@ -40,10 +42,10 @@ struct MenuBarView: View {
             if settings.audioInputSource == .microphone,
                settings.selectedModel.backend == .whisperKit {
                 HStack {
-                    Text("Sensitivity")
+                    Text("收音灵敏度")
                         .font(.system(size: 12))
                     Spacer()
-                    Picker("Sensitivity", selection: $settings.speechDetectionSensitivity) {
+                    Picker("收音灵敏度", selection: $settings.speechDetectionSensitivity) {
                         ForEach(SpeechDetectionSensitivity.allCases) { sensitivity in
                             Text(sensitivity.displayName).tag(sensitivity)
                         }
@@ -60,31 +62,37 @@ struct MenuBarView: View {
 
             Divider()
 
-            MenuBarActionButton("Open Transcript", action: onOpenTranscript)
-            MenuBarActionButton("Settings...", action: onOpenSettings)
-            MenuBarActionButton("Quit StreamTranslate", action: onQuit)
+            if settings.phoneOnlyDisplay {
+                Text("仅手机显示 · 电脑字幕已隐藏").font(.caption).foregroundStyle(.secondary)
+                MenuBarActionButton("退出仅手机模式（显示电脑字幕）", action: onTogglePhoneOnly)
+            } else {
+                MenuBarActionButton("手机字幕…", action: onOpenPhone)
+                MenuBarActionButton("字幕记录", action: onOpenTranscript)
+                MenuBarActionButton("设置…", action: onOpenSettings)
+            }
+            MenuBarActionButton("退出 StreamTranslate", action: onQuit)
         }
         .padding(12)
         .frame(width: 220)
     }
 
     private var statusLabel: String {
-        if viewModel.isLoading { return viewModel.statusMessage.isEmpty ? "Loading model..." : viewModel.statusMessage }
-        if viewModel.isPreparingTranslation { return "Preparing translation..." }
-        if viewModel.isFinalizingCapture { return "Finalizing last words..." }
-        if viewModel.isStartingCapture { return "Starting audio..." }
-        if viewModel.isRecording { return "Recording" }
-        if viewModel.isModelReady { return "Ready" }
-        return "Idle"
+        if viewModel.isLoading { return "正在准备语音模型…" }
+        if viewModel.isPreparingTranslation { return "正在准备翻译…" }
+        if viewModel.isFinalizingCapture { return "正在完成最后一句…" }
+        if viewModel.isStartingCapture { return "正在启动收音…" }
+        if viewModel.isRecording { return "正在翻译" }
+        if viewModel.isModelReady { return "已就绪" }
+        return "待机"
     }
 
     private var buttonLabel: String {
-        if viewModel.isRecording { return "Stop" }
-        if viewModel.isLoading { return "Loading..." }
-        if viewModel.isPreparingTranslation { return "Preparing..." }
-        if viewModel.isFinalizingCapture { return "Finalizing..." }
-        if viewModel.isStartingCapture { return "Starting..." }
-        return "Start"
+        if viewModel.isRecording { return "停止翻译" }
+        if viewModel.isLoading { return "正在加载…" }
+        if viewModel.isPreparingTranslation { return "正在准备…" }
+        if viewModel.isFinalizingCapture { return "正在收尾…" }
+        if viewModel.isStartingCapture { return "正在启动…" }
+        return "开始翻译"
     }
 }
 

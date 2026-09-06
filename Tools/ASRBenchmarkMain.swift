@@ -9,11 +9,12 @@ enum ASRBenchmarkMain {
             print(
                 "usage: StreamTranslateASRBench <audio-file> "
                     + "[--reference <text>] [--realtime] [--repeat <count>] "
-                    + "[--gap-seconds <seconds>] [--apple-only|--whisper-only]"
+                    + "[--gap-seconds <seconds>] [--language en|zh] [--apple-only|--whisper-only]"
             )
             Foundation.exit(2)
         }
         let realtime = arguments.contains("--realtime")
+        let language: SpokenLanguage = value(after: "--language", in: arguments) == "zh" ? .chinese : .english
         let repeatCount = max(1, Int(value(after: "--repeat", in: arguments) ?? "1") ?? 1)
         let gapSeconds = max(
             0,
@@ -47,11 +48,12 @@ enum ASRBenchmarkMain {
                 samples: samples,
                 duration: duration,
                 realtime: realtime,
-                reference: reference
+                reference: reference,
+                language: language
             )
         }
         if !arguments.contains("--apple-only") {
-            try await benchmarkWhisper(samples: samples, reference: reference)
+            try await benchmarkWhisper(samples: samples, reference: reference, language: language)
         }
     }
 
@@ -59,9 +61,10 @@ enum ASRBenchmarkMain {
         samples: [Float],
         duration: TimeInterval,
         realtime: Bool,
-        reference: String?
+        reference: String?,
+        language: SpokenLanguage
     ) async throws {
-        let service = AppleStreamingTranscriptionService()
+        let service = AppleStreamingTranscriptionService(language: language)
         let clock = ContinuousClock()
         let startedAt = clock.now
         let stream = AsyncStream<CapturedAudioChunk> { continuation in
@@ -108,7 +111,9 @@ enum ASRBenchmarkMain {
                 firstResultText = update.output.text
             }
             if firstTranslationReadySeconds == nil,
-               normalizedWords(update.output.text).count >= 3 {
+               (language == .chinese
+                    ? update.output.text.filter { $0.isLetter }.count >= 4
+                    : normalizedWords(update.output.text).count >= 3) {
                 firstTranslationReadySeconds = elapsed
             }
             if update.isFinal {
@@ -122,7 +127,7 @@ enum ASRBenchmarkMain {
         let lag = realtime ? wall - duration : wall
         print(
             String(
-                format: "apple first=%.3fs translationReady=%.3fs wall=%.3fs "
+                format: "apple first=%.3fs prefixReady=%.3fs wall=%.3fs "
                     + "endLag=%.3fs partials=%d finals=%d firstText=%@ text=%@",
                 firstResultSeconds ?? -1,
                 firstTranslationReadySeconds ?? -1,
@@ -134,14 +139,15 @@ enum ASRBenchmarkMain {
                 text
             )
         )
-        if let reference {
+        if let reference, language == .english {
             print(String(format: "apple WER=%.4f", wordErrorRate(reference, text)))
         }
     }
 
     private static func benchmarkWhisper(
         samples: [Float],
-        reference: String?
+        reference: String?,
+        language: SpokenLanguage
     ) async throws {
         let clock = ContinuousClock()
         let loadStarted = clock.now
@@ -152,7 +158,7 @@ enum ASRBenchmarkMain {
         let inferenceStarted = clock.now
         let output = try await service.transcribe(
             samples,
-            languageHint: .english
+            languageHint: language
         )
         let inference = seconds(inferenceStarted.duration(to: clock.now))
         let text = output?.text ?? ""
@@ -164,7 +170,7 @@ enum ASRBenchmarkMain {
                 text
             )
         )
-        if let reference {
+        if let reference, language == .english {
             print(String(format: "whisper-small WER=%.4f", wordErrorRate(reference, text)))
         }
     }

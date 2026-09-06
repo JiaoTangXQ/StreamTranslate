@@ -1,4 +1,7 @@
 import Foundation
+#if SWIFT_PACKAGE
+import NemotronBridge
+#endif
 
 enum NemotronStreamingTranscriptionError: Error, LocalizedError {
     case assetsMissing(String)

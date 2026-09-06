@@ -65,7 +65,7 @@ struct PartialTranslationRequest: Sendable {
     let generation: Int
 }
 
-private struct FinalTranslationRequest: Sendable {
+struct FinalTranslationRequest: Sendable {
     let entryID: UUID
     let segment: SpeechSegment
     let output: TranscriptionOutput
@@ -74,6 +74,7 @@ private struct FinalTranslationRequest: Sendable {
     let generation: Int
     let queuedAt: Date
     let logger: MeetingSessionLogger?
+    var corroboratingOriginal: String = ""
 }
 
 actor PartialTranslationQueue {
@@ -137,6 +138,7 @@ actor PartialTranslationQueue {
 
 struct CaptionContentRevision: Equatable {
     let historyCount: Int
+    let historyRevision: Int
     let streamingSegmentStartSample: Int64?
 }
 
@@ -169,6 +171,11 @@ final class CaptionViewModel {
     var isRecording = false
     var isStartingCapture = false
     var isFinalizingCapture = false
+    var isChangingCaptureConfiguration = false
+    var quickControlMessage = ""
+    @ObservationIgnored private var captureStopTask: Task<Void, Never>?
+    @ObservationIgnored private var quickResumeRequested = false
+    @ObservationIgnored private var captureStartGeneration = 0
     var isLoading = false
     var isModelReady = false
     var isPreparingTranslation = false
@@ -186,6 +193,9 @@ final class CaptionViewModel {
 
     var captionHistory: [CaptionEntry] = []
     var recentCaptions: [CaptionEntry] = []
+    private(set) var historyRevision = 0
+    private(set) var companionSessionID = UUID()
+    private(set) var companionSessionStartedAt = Date.distantPast
 
     let translationService = TranslationService()
 
@@ -204,6 +214,7 @@ final class CaptionViewModel {
     var captionContentRevision: CaptionContentRevision {
         CaptionContentRevision(
             historyCount: captionHistory.count,
+            historyRevision: historyRevision,
             streamingSegmentStartSample: streamingSegmentStartSample
         )
     }
@@ -221,6 +232,20 @@ final class CaptionViewModel {
     private var pendingFinalTranslations: [FinalTranslationRequest] = []
     private var finalTranslationWorker: Task<Void, Never>?
     private var finalTranslationWorkerID: UUID?
+    private var audioReviewTap: Task<Void, Never>?
+    private var reviewAudio: ReviewAudioBuffer?
+    private var reviewService: (any RecognitionReviewProviding)?
+    private var recognitionReviewWorker: Task<Void, Never>?
+    private var recognitionReviewWorkerID: UUID?
+    private var pendingRecognitionReviews: [(FinalTranslationRequest, [Float], [Float])] = []
+    private var translationRefiner: (any TranslationRefinementProviding)?
+    private var translationRefinementWorker: Task<Void, Never>?
+    private var translationRefinementWorkerID: UUID?
+    private var pendingTranslationRefinements: [FinalTranslationRequest] = []
+    private var refinedSources: [UUID: String] = [:]
+    private var refinementContextStart: Date = .distantFuture
+    private var memoryPressureMonitor: (any DispatchSourceMemoryPressure)?
+    private var memoryPressureMonitorID: UUID?
     private var cleanupTask: Task<Void, Never>?
     private var readyTranslationDirections: Set<TranslationDirection> = []
     private var transcriptionContext = TranscriptionContext()
@@ -228,7 +253,13 @@ final class CaptionViewModel {
     private let translationGate = TranslationGate()
     private var captionGeneration = 0
     private var streamingSegmentStartSample: Int64?
+    private var streamingSegmentEndSample: Int64?
+    private var latestRecognizedOriginal = ""
+    private var initialPhraseTask: Task<Void, Never>?
     private var lastPartialTranslationRequestText = ""
+    private var lastPartialTranslationRequestAt: ContinuousClock.Instant?
+    private var pendingPartialTranslation: PartialTranslationRequest?
+    private var partialTranslationDeadlineTask: Task<Void, Never>?
     private var activeRecognitionVocabulary = ""
     private var activeModel = ASRModel.defaultModel
 
@@ -269,8 +300,9 @@ final class CaptionViewModel {
                     streamingTranscriptionService = service
                     transcriptionService = nil
                 case .appleSpeech:
-                    AppLogger.log("Preparing Apple streaming English model")
-                    let service = AppleStreamingTranscriptionService()
+                    let language = model.requiredRecognitionMode?.languageHint ?? .english
+                    AppLogger.log("Preparing Apple streaming \(language.displayName) model")
+                    let service = AppleStreamingTranscriptionService(language: language)
                     try await service.prepare()
                     streamingTranscriptionService = service
                     transcriptionService = nil
@@ -369,8 +401,18 @@ final class CaptionViewModel {
         appendCaption(entry)
     }
 
+    func beginCompanionSession() {
+        companionSessionID = UUID()
+        companionSessionStartedAt = .now
+    }
+
     func clearHistory() {
+        beginCompanionSession()
         captionGeneration += 1
+        cancelRecognitionReviews(stopService: false)
+        cancelTranslationRefinements(stopService: false)
+        refinedSources = [:]
+        refinementContextStart = .now
         activePartialTranslationOperation?.cancel()
         activePartialTranslationOperation = nil
         finalTranslationWorker?.cancel()
@@ -379,12 +421,53 @@ final class CaptionViewModel {
         pendingFinalTranslations = []
         captionHistory = []
         recentCaptions = []
+        historyRevision += 1
         clearStreamingState()
         cleanupTask?.cancel()
         cleanupTask = nil
     }
 
     // MARK: - Capture control
+
+    /// One user action owns stop → configure → prepare → optional resume.
+    /// No detached UI observer is allowed to start a second model switch.
+    func changeCaptureConfiguration(settings: CaptionSettings,
+                                    source: AudioInputSource? = nil,
+                                    mode: RecognitionLanguageMode? = nil) {
+        guard !isChangingCaptureConfiguration, !isStartingCapture,
+              !isFinalizingCapture, !isLoading else { return }
+        guard (source != nil && source != settings.audioInputSource)
+                || (mode != nil && mode != settings.recognitionLanguageMode) else { return }
+        let wasRecording = isRecording
+        isChangingCaptureConfiguration = true
+        quickControlMessage = wasRecording ? "正在收尾并切换，音频会短暂中断…" : "正在应用选择…"
+        if wasRecording { stopCapture() }
+        quickResumeRequested = wasRecording
+        Task { @MainActor in
+            defer { isChangingCaptureConfiguration = false; quickResumeRequested = false }
+            await captureStopTask?.value
+            if let source { settings.audioInputSource = source }
+            if let mode { settings.recognitionLanguageMode = mode }
+            if activeModel.id != settings.selectedModelId || !isModelReady {
+                quickControlMessage = "正在准备\(settings.recognitionLanguageMode.displayName)识别；首次可能需要下载模型…"
+                switchModel(to: settings.selectedModelId)
+                while isLoading { try? await Task.sleep(for: .milliseconds(100)) }
+                guard isModelReady, activeModel.id == settings.selectedModelId else {
+                    quickControlMessage = "未能完成切换：\(statusMessage)"
+                    return
+                }
+            }
+            if quickResumeRequested {
+                quickControlMessage = "正在恢复收音…"
+                await startCapture(source: settings.audioInputSource,
+                    sensitivity: settings.speechDetectionSensitivity,
+                    recognitionMode: settings.recognitionLanguageMode,
+                    recognitionVocabulary: settings.recognitionVocabulary,
+                    captureDiagnosticsEnabled: settings.captureDiagnosticsEnabled)
+                quickControlMessage = isRecording ? "" : "未能恢复收音：\(statusMessage)"
+            } else { quickControlMessage = "" }
+        }
+    }
 
     func toggleCapture(
         source: AudioInputSource = .microphone,
@@ -393,6 +476,12 @@ final class CaptionViewModel {
         recognitionVocabulary: String = "",
         captureDiagnosticsEnabled: Bool = false
     ) {
+        if isChangingCaptureConfiguration {
+            quickResumeRequested = false
+            if isStartingCapture { stopCapture(gracefully: false) }
+            quickControlMessage = "已取消自动恢复；完成当前准备后保持停止。"
+            return
+        }
         AppLogger.log("toggleCapture called, isRecording=\(isRecording), isModelReady=\(isModelReady)")
         if isRecording {
             stopCapture()
@@ -419,6 +508,7 @@ final class CaptionViewModel {
         guard !isRecording, !isStartingCapture, !isFinalizingCapture else { return }
         isStartingCapture = true
         defer { isStartingCapture = false }
+        let startGeneration = captureStartGeneration
 
         if !isModelReady {
             preloadModel()
@@ -428,6 +518,7 @@ final class CaptionViewModel {
             guard isModelReady else { return }
         }
 
+        guard startGeneration == captureStartGeneration else { return }
         guard (activeModel.usesNativeStreaming
                 && streamingTranscriptionService != nil)
                 || (activeModel.backend == .whisperKit
@@ -439,6 +530,10 @@ final class CaptionViewModel {
             statusMessage = isPreparingTranslation
                 ? "Translation is still preparing"
                 : "Translation is not available"
+            return
+        }
+        guard activeModel.supports(recognitionMode) else {
+            statusMessage = "Recognition language does not match the loaded model. Select a compatible model in Settings."
             return
         }
 
@@ -470,6 +565,15 @@ final class CaptionViewModel {
             AppLogger.log("Starting audio capture: \(source.rawValue)")
 
             try await audioService.start()
+            guard startGeneration == captureStartGeneration else {
+                await audioService.stop()
+                logger?.finish()
+                audioCaptureService = nil; sessionLogger = nil
+                return
+            }
+            // A quick source/language switch is still the same conversation.
+            // A separate user-started recording keeps the existing fresh-session boundary.
+            if !isChangingCaptureConfiguration { beginCompanionSession() }
             isRecording = true
             statusMessage = ""
             transcriptionContext.reset()
@@ -499,12 +603,21 @@ final class CaptionViewModel {
     }
 
     func stopCapture(gracefully: Bool = true) {
+        captureStartGeneration &+= 1
+        quickResumeRequested = false
         if gracefully, activeModel.usesNativeStreaming {
             stopStreamingCaptureGracefully()
             return
         }
 
         isRecording = false
+        memoryPressureMonitor?.cancel()
+        memoryPressureMonitor = nil
+        memoryPressureMonitorID = nil
+        cancelRecognitionReviews(stopService: true)
+        cancelTranslationRefinements(stopService: true)
+        audioReviewTap?.cancel()
+        audioReviewTap = nil
         segmentationTask?.cancel()
         segmentationTask = nil
         pipelineTask?.cancel()
@@ -519,7 +632,7 @@ final class CaptionViewModel {
 
         let service = audioCaptureService
         let logger = sessionLogger
-        Task {
+        captureStopTask = Task {
             await translationQueue?.finish()
             await service?.stop()
             logger?.finish()
@@ -559,7 +672,7 @@ final class CaptionViewModel {
         segmentationTask = nil
         transcriptionContext.reset()
 
-        Task {
+        captureStopTask = Task {
             await service?.stop()
             await recognition?.value
             await translationQueue?.finish()
@@ -577,8 +690,14 @@ final class CaptionViewModel {
                 clearStreamingState()
             }
 
-            let finalWorker = finalTranslationWorker
-            await finalWorker?.value
+            await waitForFinalTranslations()
+            memoryPressureMonitor?.cancel()
+            memoryPressureMonitor = nil
+            memoryPressureMonitorID = nil
+            cancelRecognitionReviews(stopService: true)
+            cancelTranslationRefinements(stopService: true)
+            audioReviewTap?.cancel()
+            audioReviewTap = nil
             logger?.finish()
             isFinalizingCapture = false
             if statusMessage == "Finalizing last words..." {
@@ -595,6 +714,16 @@ final class CaptionViewModel {
         sensitivity: SpeechDetectionSensitivity,
         recognitionMode: RecognitionLanguageMode
     ) {
+        startMemoryPressureMonitor()
+        if UserDefaults.standard.object(forKey: "translationRefinementEnabled") as? Bool != false,
+           LocalHYTranslationService.isInstalled {
+            let refiner = LocalHYTranslationService()
+            configureTranslationRefinement(refiner)
+            Task {
+                do { try await refiner.prepare(); AppLogger.log("Local Hy-MT bidirectional refinement ready") }
+                catch { refiner.cancel(); AppLogger.log("Local Hy-MT unavailable; keeping Apple translation: \(error)") }
+            }
+        }
         if activeModel.usesNativeStreaming {
             runNativeStreamingPipeline(audioStream: audioStream)
             return
@@ -610,38 +739,42 @@ final class CaptionViewModel {
         audioStream: AsyncStream<CapturedAudioChunk>
     ) {
         guard let transcription = streamingTranscriptionService else { return }
+        var recognitionAudio = audioStream
+        if UserDefaults.standard.object(forKey: "recognitionReviewEnabled") as? Bool != false,
+           LocalQwenService.isInstalled {
+            let buffer = ReviewAudioBuffer()
+            let reviewer = LocalQwenService()
+            configureRecognitionReview(reviewer, audio: buffer)
+            Task {
+                do { try await reviewer.prepare(); AppLogger.log("Local Qwen review ready") }
+                catch { AppLogger.log("Local Qwen review unavailable; keeping fast recognition: \(error)") }
+            }
+            let (stream, continuation) = AsyncStream<CapturedAudioChunk>.makeStream()
+            recognitionAudio = stream
+            audioReviewTap = Task {
+                for await chunk in audioStream {
+                    guard !Task.isCancelled else { break }
+                    buffer.append(chunk.samples)
+                    continuation.yield(chunk)
+                }
+                continuation.finish()
+            }
+        }
         let logger = sessionLogger
         let translationQueue = PartialTranslationQueue()
         partialTranslationQueue = translationQueue
 
-        AppLogger.log("Recognition profile: \(activeModel.name) continuous en_US")
+        AppLogger.log("Recognition profile: \(activeModel.name) continuous \(activeModel.requiredRecognitionMode?.rawValue ?? "automatic")")
         logger?.recordPipelineStatus(
             "recognition_backend",
             detail: activeModel.id
         )
-        partialTranslationTask = Task { [weak self] in
-            while !Task.isCancelled,
-                  let initialRequest = await translationQueue.next(),
-                  let self {
-                try? await Task.sleep(for: .milliseconds(30))
-                guard !Task.isCancelled,
-                      let request = await translationQueue.coalesced(
-                        with: initialRequest
-                      ) else { continue }
-                let operation = Task { [weak self] in
-                    guard let self else { return }
-                    await self.processPartialTranslation(request, logger: logger)
-                }
-                self.activePartialTranslationOperation = operation
-                await operation.value
-                self.activePartialTranslationOperation = nil
-            }
-        }
+        startPartialTranslationWorker(translationQueue, logger: logger)
 
         pipelineTask = Task { [weak self] in
             do {
                 let updates = transcription.updates(
-                    from: audioStream,
+                    from: recognitionAudio,
                     vocabulary: self?.activeRecognitionVocabulary ?? ""
                 )
                 for try await update in updates {
@@ -689,25 +822,7 @@ final class CaptionViewModel {
             "recognition_backend",
             detail: modelProfile.id
         )
-
-        partialTranslationTask = Task { [weak self] in
-            while !Task.isCancelled,
-                  let initialRequest = await translationQueue.next(),
-                  let self {
-                try? await Task.sleep(for: .milliseconds(30))
-                guard !Task.isCancelled,
-                      let request = await translationQueue.coalesced(
-                        with: initialRequest
-                      ) else { continue }
-                let operation = Task { [weak self] in
-                    guard let self else { return }
-                    await self.processPartialTranslation(request, logger: logger)
-                }
-                self.activePartialTranslationOperation = operation
-                await operation.value
-                self.activePartialTranslationOperation = nil
-            }
-        }
+        startPartialTranslationWorker(translationQueue, logger: logger)
 
         segmentationTask = Task {
             var segmenter = SpeechSegmenter(
@@ -755,6 +870,33 @@ final class CaptionViewModel {
                 }
             }
         }
+    }
+
+    /// Shared by native/Whisper pipelines and the local replay benchmark.
+    func startPartialTranslationWorker(
+        _ translationQueue: PartialTranslationQueue,
+        logger: MeetingSessionLogger?
+    ) {
+        partialTranslationTask?.cancel()
+        partialTranslationTask = Task { [weak self] in
+            while !Task.isCancelled,
+                  let initialRequest = await translationQueue.next(),
+                  let self {
+                try? await Task.sleep(for: .milliseconds(30))
+                guard !Task.isCancelled,
+                      let request = await translationQueue.coalesced(
+                        with: initialRequest
+                      ) else { continue }
+                let operation = Task { [weak self] in
+                    guard let self else { return }
+                    await self.processPartialTranslation(request, logger: logger)
+                }
+                self.activePartialTranslationOperation = operation
+                await operation.value
+                self.activePartialTranslationOperation = nil
+            }
+        }
+
     }
 
     private func processPartial(
@@ -812,7 +954,9 @@ final class CaptionViewModel {
         }
     }
 
-    private func processStreamingUpdate(
+    // Also used by the local replay checks, exercising the production pipeline
+    // without capturing a microphone or system audio.
+    func processStreamingUpdate(
         _ update: StreamingTranscriptionUpdate,
         logger: MeetingSessionLogger?,
         partialTranslations: PartialTranslationQueue
@@ -857,35 +1001,101 @@ final class CaptionViewModel {
         direction: TranslationDirection,
         partialTranslations: PartialTranslationQueue
     ) async {
-        let presentation = showStreamingPartial(output, segment: segment)
-        let conservativePrefix = captionTextStabilizer.conservativeTranslationPrefix(
-            in: output.text,
-            language: output.language
+        initialPhraseTask?.cancel()
+        initialPhraseTask = nil
+        showStreamingPartial(output, segment: segment)
+        let sourceText = TranslationDraftPlanner.prefix(in: output.text, language: output.language)
+        let request = PartialTranslationRequest(
+            segment: segment,
+            output: output,
+            sourceText: sourceText,
+            direction: direction,
+            generation: captionGeneration
         )
-        let sourceText = CaptionTextStabilizer.semanticUnitCount(
-            in: conservativePrefix
-        ) > CaptionTextStabilizer.semanticUnitCount(in: presentation.stable)
-            ? conservativePrefix
-            : presentation.stable
-        if PartialTranslationPolicy.shouldRequest(
-            previousText: lastPartialTranslationRequestText,
-            stableText: sourceText,
-            language: output.language
-        ) {
-            lastPartialTranslationRequestText = sourceText
-            await partialTranslations.submit(
-                PartialTranslationRequest(
-                    segment: segment,
-                    output: output,
-                    sourceText: sourceText,
-                    direction: direction,
-                    generation: captionGeneration
-                )
-            )
+        await schedulePartialTranslation(request, queue: partialTranslations)
+        if lastPartialTranslationRequestText.isEmpty,
+           !TranslationDraftPlanner.hasEnoughContext(sourceText, language: output.language),
+           TranslationDraftPlanner.canSettleInitialPhrase(output.text, language: output.language) {
+            let settled = PartialTranslationRequest(segment: segment, output: output,
+                sourceText: output.text.trimmingCharacters(in: .whitespacesAndNewlines),
+                direction: direction, generation: captionGeneration)
+            initialPhraseTask = Task { [weak self] in
+                do { try await Task.sleep(for: TranslationDraftPlanner.initialSettleDelay) }
+                catch { return }
+                guard !Task.isCancelled, let self,
+                      self.lastPartialTranslationRequestText.isEmpty,
+                      self.latestRecognizedOriginal == output.text else { return }
+                self.initialPhraseTask = nil
+                await self.submitPartialTranslation(settled, queue: partialTranslations)
+            }
         }
         AppLogger.log(
             "Partial \(output.language.rawValue) (reported \(output.reportedLanguageCode)): \(output.text)"
         )
+    }
+
+    private func schedulePartialTranslation(
+        _ request: PartialTranslationRequest,
+        queue: PartialTranslationQueue
+    ) async {
+        guard TranslationDraftPlanner.hasEnoughContext(
+                request.sourceText, language: request.output.language
+              ),
+              !lastPartialTranslationRequestText.hasPrefix(request.sourceText) else {
+            cancelPendingPartialTranslation()
+            return
+        }
+        let elapsed = lastPartialTranslationRequestAt.map {
+            let duration = $0.duration(to: .now)
+            return Double(duration.components.seconds)
+                + Double(duration.components.attoseconds) / 1e18
+        } ?? 0
+        if lastPartialTranslationRequestText.isEmpty || PartialTranslationPolicy.shouldRequest(
+            previousText: lastPartialTranslationRequestText,
+            stableText: request.sourceText,
+            language: request.output.language,
+            elapsedSinceLastRequest: elapsed
+        ) {
+            await submitPartialTranslation(request, queue: queue)
+            return
+        }
+
+        pendingPartialTranslation = request
+        // Keep the original deadline while replacing pending text. A trailing
+        // debounce would starve translation during continuous speech.
+        guard partialTranslationDeadlineTask == nil else { return }
+        let deadline = (lastPartialTranslationRequestAt ?? .now).advanced(
+            by: .seconds(PartialTranslationPolicy.maximumWait)
+        )
+        partialTranslationDeadlineTask = Task { [weak self] in
+            do { try await ContinuousClock().sleep(until: deadline) }
+            catch { return }
+            guard !Task.isCancelled, let self,
+                  let latest = self.pendingPartialTranslation else { return }
+            self.partialTranslationDeadlineTask = nil
+            await self.submitPartialTranslation(latest, queue: queue)
+        }
+    }
+
+    private func submitPartialTranslation(
+        _ request: PartialTranslationRequest,
+        queue: PartialTranslationQueue
+    ) async {
+        cancelPendingPartialTranslation()
+        guard request.generation == captionGeneration,
+              streamingSegmentStartSample == request.segment.startSample,
+              streamingSourceLanguage == request.output.language else { return }
+        lastPartialTranslationRequestText = request.sourceText
+        lastPartialTranslationRequestAt = .now
+        await queue.submit(request)
+    }
+
+    private func cancelPendingPartialTranslation() {
+        initialPhraseTask?.cancel()
+        initialPhraseTask = nil
+        partialTranslationDeadlineTask?.cancel()
+        partialTranslationDeadlineTask = nil
+        pendingPartialTranslation = nil
     }
 
     private func processPartialTranslation(
@@ -894,6 +1104,14 @@ final class CaptionViewModel {
     ) async {
         guard request.generation == captionGeneration else { return }
         let translationStarted = Date()
+        logger?.recordTranslation(
+            "partial_translation_started",
+            segment: request.segment,
+            sourceText: request.sourceText,
+            translatedText: "",
+            direction: request.direction,
+            duration: 0
+        )
         let translation = await translate(
             request.sourceText,
             direction: request.direction
@@ -917,8 +1135,7 @@ final class CaptionViewModel {
         guard request.generation == captionGeneration,
               streamingSegmentStartSample == request.segment.startSample,
               lastPartialTranslationRequestText == request.sourceText,
-              (streamingStableOriginal + streamingDraftOriginal)
-                .hasPrefix(request.sourceText) else { return }
+              latestRecognizedOriginal.hasPrefix(request.sourceText) else { return }
         showStreamingTranslation(
             translation.text,
             sourceLanguage: request.output.language
@@ -990,15 +1207,38 @@ final class CaptionViewModel {
         logger: MeetingSessionLogger?,
         partialTranslations: PartialTranslationQueue
     ) async {
-        activePartialTranslationOperation?.cancel()
+        // Native finals may trim silence from both ends of a volatile range.
+        // A newer draft extending beyond an older final must remain live.
+        let finalizedDraftStart = streamingSegmentStartSample
+        let finalizesDraft: Bool
+        if let start = streamingSegmentStartSample, let end = streamingSegmentEndSample {
+            finalizesDraft = start == segment.startSample || (
+                start < segment.endSample && end > segment.startSample
+                && (start <= segment.startSample || end <= segment.endSample)
+            )
+        } else {
+            finalizesDraft = false
+        }
+        if finalizesDraft {
+            cancelPendingPartialTranslation()
+            activePartialTranslationOperation?.cancel()
+        }
         await partialTranslations.discard(segmentStartingAt: segment.startSample)
-        let finalPresentation = captionTextStabilizer.finalize(
-            text: output.text,
-            segmentStartSample: segment.startSample
+        if finalizesDraft, let finalizedDraftStart, finalizedDraftStart != segment.startSample {
+            await partialTranslations.discard(segmentStartingAt: finalizedDraftStart)
+        }
+        // A delayed final for an older range must not reset the live range's
+        // frozen prefix or its pending translation deadline.
+        var finalStabilizer = finalizesDraft
+            ? captionTextStabilizer : CaptionTextStabilizer()
+        let finalPresentation = finalStabilizer.finalize(
+            text: output.text, segmentStartSample: segment.startSample
         )
-        let finalText = finalPresentation.fullText
+        let finalText = finalPresentation.recognizedText
+        guard !finalText.isEmpty else { return }
         let draftTranslation: String
-        if streamingSegmentStartSample == segment.startSample,
+        let corroboratingOriginal = finalizesDraft ? latestRecognizedOriginal : ""
+        if finalizesDraft,
            streamingSourceLanguage == output.language {
             draftTranslation = streamingTranslatedText
         } else {
@@ -1015,7 +1255,7 @@ final class CaptionViewModel {
             sourceLanguage: output.language
         )
         appendCaption(entry)
-        if streamingSegmentStartSample == segment.startSample {
+        if finalizesDraft {
             clearStreamingState()
         }
         logger?.recordTranslation(
@@ -1027,8 +1267,7 @@ final class CaptionViewModel {
             duration: 0
         )
 
-        enqueueFinalTranslation(
-            FinalTranslationRequest(
+        let request = FinalTranslationRequest(
                 entryID: entry.id,
                 segment: segment,
                 output: output,
@@ -1036,14 +1275,94 @@ final class CaptionViewModel {
                 direction: direction,
                 generation: captionGeneration,
                 queuedAt: .now,
-                logger: logger
+                logger: logger,
+                corroboratingOriginal: corroboratingOriginal
             )
-        )
+        enqueueFinalTranslation(request)
+        if let reviewer = reviewService, reviewer.isReady,
+           segment.endSample - segment.startSample >= 8000,
+           segment.endSample - segment.startSample <= 320_000,
+           let samples = reviewAudio?.slice(start: segment.startSample, end: segment.endSample),
+           let contextSamples = reviewAudio?.contextualSlice(start: segment.startSample, end: segment.endSample) {
+            // At most one running and two queued reviews. A busy verifier must
+            // never accumulate seconds of stale work or block live captions.
+            if pendingRecognitionReviews.count == 2 { pendingRecognitionReviews.removeFirst() }
+            pendingRecognitionReviews.append((request, samples, contextSamples))
+            startRecognitionReviewWorker(reviewer)
+        }
+    }
+
+    /// Shared setup for live audio and deterministic local replay/tests.
+    func configureRecognitionReview(_ reviewer: any RecognitionReviewProviding, audio: ReviewAudioBuffer) {
+        cancelRecognitionReviews(stopService: true)
+        reviewAudio = audio
+        reviewService = reviewer
+    }
+
+    private func startRecognitionReviewWorker(_ reviewer: any RecognitionReviewProviding) {
+        guard recognitionReviewWorker == nil else { return }
+        let workerID = UUID()
+        recognitionReviewWorkerID = workerID
+        recognitionReviewWorker = Task { [weak self] in
+            while !Task.isCancelled, let self, !self.pendingRecognitionReviews.isEmpty {
+                let (request, samples, contextSamples) = self.pendingRecognitionReviews.removeFirst()
+                guard request.generation == self.captionGeneration else { continue }
+                let began = Date()
+                do {
+                    let primary = try await reviewer.transcribe(samples)
+                    guard !Task.isCancelled,
+                          primary.trimmingCharacters(in: .whitespacesAndNewlines) != request.sourceText
+                            || RecognitionReviewPolicy.hasPriorDisagreement(request.corroboratingOriginal, with: request.sourceText, language: request.output.language) else { continue }
+                    let contextual = try await reviewer.transcribe(contextSamples)
+                    guard !Task.isCancelled, request.generation == self.captionGeneration,
+                          let revised = RecognitionReviewPolicy.consensus(primary: primary, contextual: contextual,
+                            original: request.sourceText, language: request.output.language, priorHypothesis: request.corroboratingOriginal),
+                          revised != request.sourceText,
+                          let entry = self.captionHistory.first(where: { $0.id == request.entryID }),
+                          entry.originalText == request.sourceText else { continue }
+                    self.updateCaption(id: entry.id,
+                        english: request.output.language == .english ? revised : entry.englishText,
+                        chinese: request.output.language == .chinese ? revised : entry.chineseText,
+                        sourceLanguage: request.output.language)
+                    request.logger?.recordTranslation("source_reviewed", segment: request.segment,
+                        sourceText: revised, translatedText: entry.translatedText,
+                        direction: request.direction, duration: Date().timeIntervalSince(began))
+                    AppLogger.log("Local Qwen source reviewed in \(Date().timeIntervalSince(began))s: \(revised)")
+                    self.enqueueFinalTranslation(FinalTranslationRequest(entryID: request.entryID,
+                        segment: request.segment, output: request.output, sourceText: revised,
+                        direction: request.direction, generation: request.generation,
+                        queuedAt: .now, logger: request.logger))
+                } catch {
+                    AppLogger.log("Local Qwen review failed; keeping original caption: \(error)")
+                }
+            }
+            guard let self, self.recognitionReviewWorkerID == workerID else { return }
+            self.recognitionReviewWorker = nil
+            self.recognitionReviewWorkerID = nil
+        }
+    }
+
+    private func cancelRecognitionReviews(stopService: Bool) {
+        recognitionReviewWorker?.cancel()
+        recognitionReviewWorker = nil
+        recognitionReviewWorkerID = nil
+        pendingRecognitionReviews = []
+        if stopService {
+            reviewService?.cancel()
+            reviewService = nil
+            reviewAudio = nil
+        }
     }
 
     private func enqueueFinalTranslation(_ request: FinalTranslationRequest) {
         pendingFinalTranslations.append(request)
         startFinalTranslationWorkerIfNeeded()
+    }
+
+    func waitForFinalTranslations() async {
+        await recognitionReviewWorker?.value
+        await finalTranslationWorker?.value
+        await translationRefinementWorker?.value
     }
 
     private func startFinalTranslationWorkerIfNeeded() {
@@ -1075,7 +1394,7 @@ final class CaptionViewModel {
 
     private func takeNextFinalTranslationBatch() -> [FinalTranslationRequest]? {
         pendingFinalTranslations.removeAll {
-            $0.generation != captionGeneration
+            $0.generation != captionGeneration || !isCurrentFinalTranslation($0)
         }
         guard let direction = pendingFinalTranslations.first?.direction else {
             return nil
@@ -1112,6 +1431,7 @@ final class CaptionViewModel {
         } catch is CancellationError {
             return
         } catch {
+            guard batch.contains(where: { isCurrentFinalTranslation($0) }) else { return }
             let details = Self.describe(error)
             statusMessage = "Translation error: \(error.localizedDescription)"
             AppLogger.log("Final translation batch failed: \(details)")
@@ -1130,6 +1450,8 @@ final class CaptionViewModel {
         to request: FinalTranslationRequest,
         duration: TimeInterval
     ) {
+        guard isCurrentFinalTranslation(request) else { return }
+        guard refinedSources[request.entryID] != request.sourceText else { return }
         request.logger?.recordTranslation(
             "final_translated",
             segment: request.segment,
@@ -1159,6 +1481,109 @@ final class CaptionViewModel {
             duration: 0
         )
         AppLogger.log("Translated \(request.direction): \(translatedText)")
+        enqueueTranslationRefinement(request)
+    }
+
+    func configureTranslationRefinement(_ refiner: any TranslationRefinementProviding) {
+        cancelTranslationRefinements(stopService: true)
+        translationRefiner = refiner
+        refinementContextStart = .now
+    }
+
+    func startMemoryPressureMonitor() {
+        memoryPressureMonitor?.cancel()
+        let monitorID = UUID()
+        memoryPressureMonitorID = monitorID
+        let monitor = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)
+        monitor.setEventHandler { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self, self.memoryPressureMonitorID == monitorID else { return }
+                self.suspendLocalEnhancementsForMemoryPressure()
+            }
+        }
+        memoryPressureMonitor = monitor
+        monitor.resume()
+    }
+
+    /// Preserve the base audio/ASR/translation pipeline; never restart models in
+    /// this capture after pressure, which would cause allocation/reload thrashing.
+    func suspendLocalEnhancementsForMemoryPressure() {
+        cancelRecognitionReviews(stopService: true)
+        cancelTranslationRefinements(stopService: true)
+        memoryPressureMonitor?.cancel()
+        memoryPressureMonitor = nil
+        memoryPressureMonitorID = nil
+        AppLogger.log("Memory pressure: local enhancements released; keeping system subtitles")
+    }
+
+    func refinementContext(for request: FinalTranslationRequest) -> String {
+        // The service may derive constrained terminology from this bounded
+        // context, or resolve a tightly constrained grammatical ellipsis.
+        // Raw background is never passed to the small translation model.
+        guard let index = captionHistory.firstIndex(where: { $0.id == request.entryID }) else { return "" }
+        return String(captionHistory[..<index].filter {
+            $0.timestamp >= refinementContextStart && $0.sourceLanguage == request.output.language
+        }.suffix(2).map(\.originalText).joined(separator: "\n").suffix(600))
+    }
+
+    func enqueueTranslationRefinement(_ request: FinalTranslationRequest) {
+        guard let refiner = translationRefiner, refiner.isReady else { return }
+        pendingTranslationRefinements.removeAll { $0.entryID == request.entryID }
+        if pendingTranslationRefinements.count == 2 { pendingTranslationRefinements.removeFirst() }
+        pendingTranslationRefinements.append(request)
+        guard translationRefinementWorker == nil else { return }
+        let workerID = UUID()
+        translationRefinementWorkerID = workerID
+        translationRefinementWorker = Task { [weak self] in
+            while !Task.isCancelled, let self, !self.pendingTranslationRefinements.isEmpty {
+                // Give source verification priority. It may already be fixing
+                // the source of this translation; stale revisions are discarded.
+                if let review = self.recognitionReviewWorker { await review.value }
+                guard !Task.isCancelled, !self.pendingTranslationRefinements.isEmpty else { break }
+                let request = self.pendingTranslationRefinements.removeFirst()
+                guard self.isCurrentFinalTranslation(request) else { continue }
+                let target = UserDefaults.standard.string(forKey: "translationTarget")
+                    .flatMap(TranslationTarget.init(rawValue:)) ?? .simplifiedChinese
+                let began = Date()
+                do {
+                    let raw = try await refiner.translate(request.sourceText,
+                        sourceLanguage: request.output.language, target: target, context: self.refinementContext(for: request))
+                    let translated = TranslationIntegrityPolicy.normalizedPercentUnits(raw, source: request.sourceText)
+                    guard !Task.isCancelled, self.isCurrentFinalTranslation(request),
+                          TranslationIntegrityPolicy.accepts(translated, for: request.sourceText) else { continue }
+                    self.refinedSources[request.entryID] = request.sourceText
+                    self.updateCaption(id: request.entryID,
+                        english: request.output.language == .english ? request.sourceText : translated,
+                        chinese: request.output.language == .chinese ? request.sourceText : translated,
+                        sourceLanguage: request.output.language)
+                    request.logger?.recordTranslation("translation_refined", segment: request.segment,
+                        sourceText: request.sourceText, translatedText: translated,
+                        direction: request.direction, duration: Date().timeIntervalSince(began))
+                    AppLogger.log("Local Hy-MT final translation in \(Date().timeIntervalSince(began))s: \(translated)")
+                } catch {
+                    AppLogger.log("Local Hy-MT refinement failed; keeping Apple translation: \(error)")
+                }
+            }
+            guard let self, self.translationRefinementWorkerID == workerID else { return }
+            self.translationRefinementWorker = nil
+            self.translationRefinementWorkerID = nil
+        }
+    }
+
+    private func cancelTranslationRefinements(stopService: Bool) {
+        translationRefinementWorker?.cancel()
+        translationRefinementWorker = nil
+        translationRefinementWorkerID = nil
+        pendingTranslationRefinements = []
+        if stopService {
+            translationRefiner?.cancel()
+            translationRefiner = nil
+        }
+    }
+
+    private func isCurrentFinalTranslation(_ request: FinalTranslationRequest) -> Bool {
+        request.generation == captionGeneration
+            && captionHistory.first(where: { $0.id == request.entryID })?.originalText == request.sourceText
     }
 
     private func recognizePartial(
@@ -1340,10 +1765,12 @@ final class CaptionViewModel {
         let isNewSegment = streamingSegmentStartSample != segment.startSample
         let sourceLanguageChanged = streamingSourceLanguage != output.language
         if isNewSegment || sourceLanguageChanged {
+            cancelPendingPartialTranslation()
             captionTextStabilizer.reset()
             streamingStableOriginal = ""
             streamingDraftOriginal = ""
             lastPartialTranslationRequestText = ""
+            lastPartialTranslationRequestAt = nil
             streamingEnglish = ""
             streamingChinese = ""
         }
@@ -1355,6 +1782,8 @@ final class CaptionViewModel {
             evidenceEndSample: segment.endSample
         )
         streamingSegmentStartSample = segment.startSample
+        streamingSegmentEndSample = segment.endSample
+        latestRecognizedOriginal = output.text
         streamingSourceLanguage = output.language
         streamingWords = output.words
         streamingStableOriginal = presentation.stable
@@ -1380,6 +1809,7 @@ final class CaptionViewModel {
             streamingChinese = ""
         }
         streamingSegmentStartSample = segment.startSample
+        streamingSegmentEndSample = segment.endSample
         streamingSourceLanguage = sourceLanguage
         streamingStableOriginal = text
         streamingDraftOriginal = ""
@@ -1423,6 +1853,7 @@ final class CaptionViewModel {
 
     private func appendCaption(_ entry: CaptionEntry) {
         captionHistory.append(entry)
+        historyRevision += 1
         recentCaptions.append(entry)
         while recentCaptions.count > maxRecentCaptions {
             recentCaptions.removeFirst()
@@ -1448,19 +1879,24 @@ final class CaptionViewModel {
             sourceLanguage: sourceLanguage
         )
         captionHistory[historyIndex] = updated
+        historyRevision += 1
         if let recentIndex = recentCaptions.firstIndex(where: { $0.id == id }) {
             recentCaptions[recentIndex] = updated
         }
     }
 
     private func clearStreamingState() {
+        cancelPendingPartialTranslation()
         streamingEnglish = ""
         streamingChinese = ""
         streamingWords = []
         streamingStableOriginal = ""
         streamingDraftOriginal = ""
         streamingSegmentStartSample = nil
+        streamingSegmentEndSample = nil
+        latestRecognizedOriginal = ""
         lastPartialTranslationRequestText = ""
+        lastPartialTranslationRequestAt = nil
         captionTextStabilizer.reset()
     }
 
@@ -1482,6 +1918,11 @@ final class CaptionViewModel {
             return attempt
         } catch {
             await translationGate.release()
+            // Final recognition intentionally cancels an obsolete draft. This
+            // is normal control flow, not a user-visible translation failure.
+            if Task.isCancelled || error is CancellationError {
+                return TranslationAttempt(text: "", error: nil)
+            }
             let details = Self.describe(error)
             statusMessage = "Translation error: \(error.localizedDescription)"
             AppLogger.log("Translation failed: \(details)")

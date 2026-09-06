@@ -8,6 +8,8 @@ DerivedData/
 
 # Build
 build/
+.build/
+.swiftpm/
 default.profraw
 
 # Release artifacts
@@ -15,6 +17,25 @@ default.profraw
 
 # Environment
 .env*
+
+# Private provisioning, credentials and generated pairing invitations
+.workbench/
+RemoteRelay.json
+publisher-token
+invitation.txt
+*.p12
+*.pfx
+*.key
+*.pem
+
+# Downloaded model weights and packaged applications
+*.gguf
+*.safetensors
+*.onnx
+*.mlmodelc/
+*.app/
+*.ipa
+*.xcarchive/
 
 # Tool caches
 __pycache__/

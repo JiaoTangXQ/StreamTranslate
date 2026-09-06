@@ -5,8 +5,8 @@ import Speech
 
 enum AppleStreamingTranscriptionError: Error, LocalizedError {
     case unavailable
-    case unsupportedEnglishLocale
-    case assetsUnavailable
+    case unsupportedLocale(SpokenLanguage)
+    case assetsUnavailable(SpokenLanguage)
     case audioFormatUnavailable
     case audioBufferAllocationFailed
 
@@ -14,10 +14,10 @@ enum AppleStreamingTranscriptionError: Error, LocalizedError {
         switch self {
         case .unavailable:
             return "Apple on-device speech transcription is unavailable"
-        case .unsupportedEnglishLocale:
-            return "The installed Apple speech model does not support US English"
-        case .assetsUnavailable:
-            return "The Apple English speech model could not be installed"
+        case .unsupportedLocale(let language):
+            return "Apple speech does not support \(language.displayName) on this Mac. Select Whisper as a fallback."
+        case .assetsUnavailable(let language):
+            return "The Apple \(language.displayName) speech model could not be installed. Select Whisper as a fallback."
         case .audioFormatUnavailable:
             return "No compatible Apple speech audio format is available"
         case .audioBufferAllocationFailed:
@@ -32,24 +32,39 @@ enum AppleStreamingTranscriptionError: Error, LocalizedError {
 final class AppleStreamingTranscriptionService: StreamingTranscriptionProviding,
     @unchecked Sendable {
     private static let sampleRate = 16_000.0
-    private static let locale = Locale(identifier: "en_US")
+    let language: SpokenLanguage
+    let fastResults: Bool
+    let boundedFinalization: Bool
 
     private let lock = NSLock()
     private var runningTask: Task<Void, Never>?
+    private var runningTaskID: UUID?
+
+    init(language: SpokenLanguage = .english, fastResults: Bool = true, boundedFinalization: Bool = true) {
+        self.language = language
+        self.fastResults = fastResults
+        self.boundedFinalization = boundedFinalization && language == .chinese
+    }
 
     func prepare() async throws {
-        _ = try await Self.makePreparedTranscriber(vocabulary: "")
+        _ = try await Self.makePreparedTranscriber(language: language, vocabulary: "", fastResults: fastResults)
     }
 
     func updates(
         from audioStream: AsyncStream<CapturedAudioChunk>,
         vocabulary: String
     ) -> AsyncThrowingStream<StreamingTranscriptionUpdate, Error> {
-        AsyncThrowingStream { continuation in
+        let language = self.language
+        let fastResults = self.fastResults
+        let boundedFinalization = self.boundedFinalization
+        return AsyncThrowingStream { continuation in
+            let taskID = UUID()
             let task = Task { [weak self] in
                 do {
                     let (transcriber, context) = try await Self.makePreparedTranscriber(
-                        vocabulary: vocabulary
+                        language: language,
+                        vocabulary: vocabulary,
+                        fastResults: fastResults
                     )
                     let modules: [any SpeechModule] = [transcriber]
                     guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(
@@ -69,6 +84,7 @@ final class AppleStreamingTranscriptionService: StreamingTranscriptionProviding,
                     )
                     try await analyzer.setContext(context)
                     try await analyzer.prepareToAnalyze(in: format)
+                    let finalization = boundedFinalization ? SpeechFinalizationPlanner() : nil
 
                     let resultTask = Task {
                         for try await result in transcriber.results {
@@ -92,6 +108,7 @@ final class AppleStreamingTranscriptionService: StreamingTranscriptionProviding,
                                     * Self.sampleRate).rounded())
                             )
                             let audioEnd = CMTimeGetSeconds(result.range.end)
+                            finalization?.recognized(through: end, isFinal: result.isFinal, text: text)
                             let finalizedAt = CMTimeGetSeconds(
                                 result.resultsFinalizationTime
                             )
@@ -99,8 +116,8 @@ final class AppleStreamingTranscriptionService: StreamingTranscriptionProviding,
                                 StreamingTranscriptionUpdate(
                                     output: TranscriptionOutput(
                                         text: text,
-                                        language: .english,
-                                        reportedLanguageCode: "en",
+                                        language: language,
+                                        reportedLanguageCode: language.rawValue,
                                         words: []
                                     ),
                                     startSample: start,
@@ -112,15 +129,33 @@ final class AppleStreamingTranscriptionService: StreamingTranscriptionProviding,
                         }
                     }
 
+                    let finalizationTask = Task {
+                        guard let finalization else { return }
+                        while !Task.isCancelled {
+                            do { try await Task.sleep(for: .milliseconds(200)) } catch { return }
+                            guard let boundary = finalization.nextBoundary() else { continue }
+                            do {
+                                AppLogger.log("Speech pause finalization at \(Double(boundary) / Self.sampleRate)s")
+                                try await analyzer.finalize(through: CMTime(value: boundary, timescale: 16_000))
+                            } catch {
+                                if !Task.isCancelled { AppLogger.log("Speech bounded finalization: \(error)") }
+                                return
+                            }
+                        }
+                    }
                     do {
-                        let inputSequence = audioStream.compactMap { chunk in
-                            try? Self.makeAnalyzerInput(samples: chunk.samples, format: format)
+                        let inputSequence = audioStream.map { chunk in
+                            finalization?.observe(chunk.samples)
+                            return try Self.makeAnalyzerInput(samples: chunk.samples, format: format)
                         }
                         _ = try await analyzer.analyzeSequence(inputSequence)
+                        finalizationTask.cancel()
+                        await finalizationTask.value
                         try await analyzer.finalizeAndFinishThroughEndOfInput()
                         try await resultTask.value
                         continuation.finish()
                     } catch {
+                        finalizationTask.cancel()
                         resultTask.cancel()
                         await analyzer.cancelAndFinishNow()
                         throw error
@@ -130,11 +165,12 @@ final class AppleStreamingTranscriptionService: StreamingTranscriptionProviding,
                 } catch {
                     continuation.finish(throwing: error)
                 }
-                self?.clearRunningTask()
+                self?.clearRunningTask(id: taskID)
             }
 
             lock.withLock {
                 runningTask?.cancel()
+                runningTaskID = taskID
                 runningTask = task
             }
             continuation.onTermination = { @Sendable _ in
@@ -147,31 +183,37 @@ final class AppleStreamingTranscriptionService: StreamingTranscriptionProviding,
         lock.withLock {
             runningTask?.cancel()
             runningTask = nil
+            runningTaskID = nil
         }
     }
 
-    private func clearRunningTask() {
+    private func clearRunningTask(id: UUID) {
         lock.withLock {
+            guard runningTaskID == id else { return }
             runningTask = nil
+            runningTaskID = nil
         }
     }
 
     private static func makePreparedTranscriber(
-        vocabulary: String
+        language: SpokenLanguage,
+        vocabulary: String,
+        fastResults: Bool
     ) async throws -> (SpeechTranscriber, AnalysisContext) {
         guard SpeechTranscriber.isAvailable else {
             throw AppleStreamingTranscriptionError.unavailable
         }
-        guard let supportedLocale = await SpeechTranscriber.supportedLocale(
-            equivalentTo: locale
+        guard language == .english || language == .chinese,
+              let supportedLocale = await SpeechTranscriber.supportedLocale(
+            equivalentTo: Locale(identifier: language == .chinese ? "zh_CN" : "en_US")
         ) else {
-            throw AppleStreamingTranscriptionError.unsupportedEnglishLocale
+            throw AppleStreamingTranscriptionError.unsupportedLocale(language)
         }
 
         let transcriber = SpeechTranscriber(
             locale: supportedLocale,
             transcriptionOptions: [],
-            reportingOptions: [.volatileResults, .fastResults],
+            reportingOptions: fastResults ? [.volatileResults, .fastResults] : [.volatileResults],
             attributeOptions: [.audioTimeRange, .transcriptionConfidence]
         )
         let modules: [any SpeechModule] = [transcriber]
@@ -180,7 +222,7 @@ final class AppleStreamingTranscriptionService: StreamingTranscriptionProviding,
             guard let request = try await AssetInventory.assetInstallationRequest(
                 supporting: modules
             ) else {
-                throw AppleStreamingTranscriptionError.assetsUnavailable
+                throw AppleStreamingTranscriptionError.assetsUnavailable(language)
             }
             try await request.downloadAndInstall()
         }

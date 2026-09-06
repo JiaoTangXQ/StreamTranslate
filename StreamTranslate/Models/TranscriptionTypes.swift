@@ -98,6 +98,11 @@ enum TranscriptionTextPolicy {
             .lowercased()
         guard !value.isEmpty else { return true }
 
+        // SpeechAnalyzer may emit a trailing punctuation-only range after a
+        // complete sentence. Do not create or translate a caption containing
+        // just "。" / "."; retain short words and numbers such as "15%".
+        guard value.contains(where: { $0.isLetter || $0.isNumber }) else { return true }
+
         if value.allSatisfy({ "♪♫♬♩ ".contains($0) }) {
             return true
         }

@@ -1,0 +1,9 @@
+[Unit]
+Description=Renew StreamTranslate IP certificate
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+TimeoutStartSec=300
+ExecStart=/opt/streamtranslate-relay/renew-certificate.sh

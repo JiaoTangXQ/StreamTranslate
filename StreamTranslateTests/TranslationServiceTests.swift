@@ -2,6 +2,17 @@ import Testing
 import Foundation
 @testable import StreamTranslate
 
+@Test func translationConfigurationsPreferLowLatencyWhenSupported() {
+    if #available(macOS 26.4, *) {
+        for direction in TranslationDirection.allCases {
+            let config = TranslationService().configuration(
+                direction: direction, chineseTarget: .simplifiedChinese
+            )
+            #expect(config.preferredStrategy == .lowLatency)
+        }
+    }
+}
+
 @Test @MainActor func translationServiceThrowsWithoutSession() async {
     let service = TranslationService()
     do {

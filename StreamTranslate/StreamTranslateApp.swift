@@ -1,5 +1,7 @@
 import SwiftUI
 import Translation
+import CompanionKit
+import SystemConfiguration
 
 @main
 struct StreamTranslateApp: App {
@@ -7,7 +9,14 @@ struct StreamTranslateApp: App {
 
     var body: some Scene {
         Settings {
-            EmptyView()
+            appDelegate.settingsContent
+        }
+        .commands {
+            CommandGroup(replacing: .appSettings) {
+                Button("设置…") { appDelegate.openSettingsWindow() }
+                    .keyboardShortcut(",", modifiers: .command)
+                    .disabled(appDelegate.isPhoneOnly)
+            }
         }
     }
 }
@@ -40,17 +49,67 @@ final class AppWindowSlot: NSObject, NSWindowDelegate {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var viewModel = CaptionViewModel()
+    /// Use the same state for the standard macOS Settings command (⌘,) and
+    /// the menu-bar settings window; the scene must not be an empty placeholder.
+    var settingsContent: some View {
+        Group {
+            if !settings.phoneOnlyDisplay {
+                SettingsView().environment(viewModel).environment(settings)
+            }
+        }
+    }
+    var isPhoneOnly: Bool { settings.phoneOnlyDisplay }
     private var settings = CaptionSettings()
     private var floatingPanel: FloatingPanel?
     private var hotkeyManager: HotkeyManager?
     private var popover = NSPopover()
     private var translationWindow: NSWindow?
+    private let companionWindowSlot = AppWindowSlot()
+    private let companionServer = CompanionServer()
+    private let webCompanionServer = WebCaptionServer()
+    private let remoteCompanion = RemoteCaptionRelay()
+    private let companionPublisher = CompanionCaptionPublisher()
+    private var translationPreparationTask: Task<Void, Never>?
+    private var translationPreparationID = UUID()
     private let settingsWindowSlot = AppWindowSlot()
     private let transcriptWindowSlot = AppWindowSlot()
     private var downloadProgressWindow: NSWindow?
     private var notificationObserver: Any?
+    private var windowFixturePreferenceSuite: String?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Prepare the public phone certificate without starting a second
+        // audio/model instance or interrupting the currently installed app.
+        let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("--window-interaction-fixture") {
+            runWindowInteractionFixture()
+            return
+        }
+        if arguments.count == 3, arguments[1] == "--reader-controls-preview" {
+            Task { await ReaderControlsPreview.run(directory: URL(fileURLWithPath: arguments[2], isDirectory: true)) }
+            return
+        }
+        if arguments.count == 3, arguments[1] == "--settings-preview" {
+            Task { await SettingsPreview.run(directory: URL(fileURLWithPath: arguments[2], isDirectory: true)) }
+            return
+        }
+        if arguments.count == 3, arguments[1] == "--export-web-profile" {
+            do {
+                let host = ((SCDynamicStoreCopyLocalHostName(nil) as String?) ?? "").lowercased() + ".local"
+                let identity = try WebIdentity(hostname: host, vault: CompanionVault())
+                let destination = URL(fileURLWithPath: arguments[2])
+                guard !FileManager.default.fileExists(atPath: destination.path) else { throw WebError("拒绝覆盖已有描述文件。") }
+                try identity.profile().write(to: destination, options: .atomic)
+                print("WEB PROFILE EXPORTED: \(destination.path)")
+                print("HTTPS ADDRESS: https://\(host):18443/")
+                print("PUBLIC CERTIFICATE SHA256: \(identity.fingerprint)")
+                exit(0)
+            } catch { print("WEB PROFILE ERROR: \(error.localizedDescription)"); exit(1) }
+        }
+        if ProcessInfo.processInfo.arguments.contains("--companion-privacy-check") {
+            runCompanionPrivacyCheck()
+            return
+        }
         AppLogger.clear()
         AppLogger.log("App launched. Log file: \(AppLogger.path)")
 
@@ -58,15 +117,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupFloatingPanel()
         setupHotkey()
         setupRemoteControl()
-        updateFloatingPanelWithTranslation()
+        updateFloatingPanelContent()
+        prepareIndependentTranslation()
         observePanelSize()
         observeTranslationTarget()
         observeDownloadProgress()
+        observeCompanionSettings()
+        updateCompanionConfiguration()
 
         viewModel.preloadModel(modelId: settings.selectedModelId)
+        if ProcessInfo.processInfo.arguments.contains("--open-phone-settings") {
+            openCompanionWindow()
+        }
+        if arguments.contains("--open-settings") { openSettingsWindow() }
     }
 
     /// Listen for distributed notification to toggle recording (for testing/automation)
+    private func runWindowInteractionFixture() {
+        let suite = "StreamTranslate.window-interaction.\(UUID())"
+        windowFixturePreferenceSuite = suite
+        let defaults = UserDefaults(suiteName: suite)!
+        settings = CaptionSettings(defaults: defaults)
+        settings.panelWidth = 620; settings.panelHeight = 300
+        viewModel.isRecording = true // Synthetic UI state, no capture/model tasks.
+        viewModel.isModelReady = true; viewModel.isTranslationReady = true
+        viewModel.streamingEnglish = "Window interaction test — synthetic captions only."
+        viewModel.streamingChinese = "窗口交互测试，不录音、不分享字幕。"
+        setupFloatingPanel()
+        updateFloatingPanelContent()
+        observePanelSize()
+        openCompanionWindow()
+        print("WINDOW_FIXTURE_READY pid=\(ProcessInfo.processInfo.processIdentifier)")
+        fflush(nil)
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(180))
+            defaults.removePersistentDomain(forName: suite)
+            NSApp.terminate(nil)
+        }
+    }
+
     private func setupRemoteControl() {
         // File-based remote control: `touch /tmp/tc-toggle` to toggle recording
         AppLogger.log("Setting up remote control")
@@ -117,6 +206,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             },
             onOpenTranscript: { [weak self] in self?.openTranscriptWindow() },
             onOpenSettings: { [weak self] in self?.openSettingsWindow() },
+            onOpenPhone: { [weak self] in self?.openCompanionWindow() },
+            onTogglePhoneOnly: { [weak self] in
+                guard let self else { return }
+                self.settings.phoneOnlyDisplay.toggle()
+                self.applyVisibilityPolicy()
+            },
             onQuit: { [weak self] in
                 self?.viewModel.stopCapture(gracefully: false)
                 NSApp.terminate(nil)
@@ -144,7 +239,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setupFloatingPanel() {
         let width = settings.panelWidth
-        let height = settings.panelHeight
+        let height = max(144, settings.panelHeight)
         let panel = FloatingPanel(
             contentRect: NSRect(x: 0, y: 0, width: width, height: height)
         )
@@ -168,60 +263,70 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             panel.setFrameOrigin(NSPoint(x: x, y: y))
         }
 
-        panel.orderFront(nil)
+        if !settings.phoneOnlyDisplay { panel.orderFront(nil) }
         floatingPanel = panel
     }
 
-    private func updateFloatingPanelWithTranslation() {
-        let englishToChinese = viewModel.translationService.configuration(
-            direction: .englishToChinese,
-            chineseTarget: settings.translationTarget
-        )
-        let chineseToEnglish = viewModel.translationService.configuration(
-            direction: .chineseToEnglish,
-            chineseTarget: settings.translationTarget
-        )
-        let translationService = viewModel.translationService
-        let translationState = viewModel
-        let content = FloatingCaptionView { [weak self] in
-            self?.minimizeFloatingPanel()
-        }
+    private func updateFloatingPanelContent() {
+        let content = FloatingCaptionView(
+            onMinimize: { [weak self] in self?.minimizeFloatingPanel() },
+            onSettings: { [weak self] in self?.openSettingsWindow() },
+            onPhone: { [weak self] in self?.openCompanionWindow() })
             .environment(viewModel)
             .environment(settings)
-            .translationTask(englishToChinese) { session in
-                let direction = TranslationDirection.englishToChinese
-                translationService.setSession(session, for: direction)
-                translationState.translationPreparationStarted(direction)
-                do {
-                    try await translationService.prepare(direction)
-                    translationState.translationPreparationSucceeded(direction)
-                } catch {
-                    let nsError = error as NSError
-                    translationState.translationPreparationFailed(
-                        direction,
-                        message: error.localizedDescription,
-                        details: "\(nsError.domain) code=\(nsError.code) \(nsError.localizedDescription)"
-                    )
-                }
-            }
-            .translationTask(chineseToEnglish) { session in
-                let direction = TranslationDirection.chineseToEnglish
-                translationService.setSession(session, for: direction)
-                translationState.translationPreparationStarted(direction)
-                do {
-                    try await translationService.prepare(direction)
-                    translationState.translationPreparationSucceeded(direction)
-                } catch {
-                    let nsError = error as NSError
-                    translationState.translationPreparationFailed(
-                        direction,
-                        message: error.localizedDescription,
-                        details: "\(nsError.domain) code=\(nsError.code) \(nsError.localizedDescription)"
-                    )
-                }
-            }
-
         floatingPanel?.contentView = FloatingPanelHostingView(rootView: content)
+    }
+
+    private func prepareIndependentTranslation() {
+        translationPreparationTask?.cancel()
+        let generation = UUID()
+        translationPreparationID = generation
+        let target = settings.translationTarget
+        translationPreparationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            for direction in TranslationDirection.allCases {
+                self.viewModel.translationPreparationStarted(direction)
+            }
+            for direction in TranslationDirection.allCases {
+                guard !Task.isCancelled, self.translationPreparationID == generation else { return }
+                let installed = await self.viewModel.translationService.installIndependentSession(
+                    direction: direction, chineseTarget: target)
+                guard !Task.isCancelled, self.translationPreparationID == generation else { return }
+                guard installed else {
+                    self.viewModel.translationPreparationFailed(direction,
+                        message: "请先退出仅手机模式并完成语言包准备", details: "Language assets not installed")
+                    if !self.settings.phoneOnlyDisplay { self.openTranslationSetup() }
+                    return
+                }
+                do {
+                    try await self.viewModel.translationService.prepare(direction)
+                    guard !Task.isCancelled, self.translationPreparationID == generation else { return }
+                    self.viewModel.translationPreparationSucceeded(direction)
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    self.viewModel.translationPreparationFailed(direction,
+                        message: error.localizedDescription, details: "Independent session preparation failed")
+                }
+            }
+        }
+    }
+
+    private func openTranslationSetup() {
+        guard !settings.phoneOnlyDisplay else { return }
+        if let translationWindow { translationWindow.makeKeyAndOrderFront(nil); return }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 380, height: 180),
+            styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.title = "StreamTranslate — 语言包准备"
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: TranslationSetupView(target: settings.translationTarget) { [weak self] in
+            guard let self else { return }
+            self.translationWindow?.close()
+            self.translationWindow = nil
+            self.prepareIndependentTranslation()
+        })
+        window.center()
+        translationWindow = window
+        window.makeKeyAndOrderFront(nil)
     }
 
     private func minimizeFloatingPanel() {
@@ -233,6 +338,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func restoreFloatingPanel() {
+        guard !settings.phoneOnlyDisplay else { return }
         guard let panel = floatingPanel else { return }
         if panel.isMiniaturized {
             panel.deminiaturize(nil)
@@ -242,6 +348,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func floatingPanelDidRestore() {
+        guard !settings.phoneOnlyDisplay else { floatingPanel?.orderOut(nil); return }
         AppLogger.log("Floating panel restored from Dock")
         restoreFloatingPanel()
         NSApp.setActivationPolicy(.accessory)
@@ -272,6 +379,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateDownloadProgressWindow() {
+        guard !settings.phoneOnlyDisplay else {
+            downloadProgressWindow?.close()
+            downloadProgressWindow = nil
+            return
+        }
         let isActive = viewModel.downloadProgress != nil
             || viewModel.downloadError != nil
         if isActive, downloadProgressWindow == nil {
@@ -313,16 +425,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Rebuild the floating panel's hosting view when the user picks a new
-    /// Chinese variant. `.translationTask(config)` is pinned to the view at
-    /// mount time; replacing the NSHostingView is the cleanest way to force
-    /// SwiftUI to request a new TranslationSession for the new BCP-47 target.
+    /// Recreate window-independent sessions when the language target changes.
     private func observeTranslationTarget() {
         withObservationTracking {
             let _ = settings.translationTarget
         } onChange: {
             Task { @MainActor [weak self] in
-                self?.updateFloatingPanelWithTranslation()
+                self?.translationWindow?.close()
+                self?.translationWindow = nil
+                self?.prepareIndependentTranslation()
                 self?.observeTranslationTarget()
             }
         }
@@ -331,7 +442,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func updatePanelSize() {
         guard let panel = floatingPanel else { return }
         let width = settings.panelWidth
-        let height = settings.panelHeight
+        let height = max(144, settings.panelHeight)
         guard abs(panel.frame.width - width) > 0.5
                 || abs(panel.frame.height - height) > 0.5 else { return }
 
@@ -361,17 +472,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotkeyManager = manager
     }
 
-    private func openSettingsWindow() {
+    func openSettingsWindow() {
+        guard !settings.phoneOnlyDisplay else { return }
         popover.performClose(nil)
 
         settingsWindowSlot.show { [viewModel, settings] in
             let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 450, height: 600),
-                styleMask: [.titled, .closable],
+                contentRect: NSRect(x: 0, y: 0, width: 820, height: 650),
+                styleMask: [.titled, .closable, .resizable],
                 backing: .buffered,
                 defer: false
             )
-            window.title = "Settings"
+            window.title = "设置"
+            window.contentMinSize = NSSize(width: 720, height: 540)
             window.contentView = NSHostingView(
                 rootView: SettingsView()
                     .environment(viewModel)
@@ -384,6 +497,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func openTranscriptWindow() {
+        guard !settings.phoneOnlyDisplay else { return }
         transcriptWindowSlot.show { [viewModel, settings] in
             let window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 600, height: 500),
@@ -401,5 +515,122 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return window
         }
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func openCompanionWindow() {
+        guard !settings.phoneOnlyDisplay else { return }
+        popover.performClose(nil)
+        companionWindowSlot.show { [companionServer, webCompanionServer, remoteCompanion, settings, viewModel] in
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 650),
+                styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            window.title = "StreamTranslate — 手机字幕"
+            // An explicit control window must remain above the caption panel,
+            // including when the user has expanded captions across the screen.
+            window.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 1)
+            window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            window.contentView = NSHostingView(rootView: CompanionSettingsView(server: companionServer, webServer: webCompanionServer, remote: remoteCompanion)
+                .environment(settings).environment(viewModel))
+            window.center()
+            return window
+        }
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func observeCompanionSettings() {
+        withObservationTracking {
+            _ = settings.phoneOnlyDisplay
+            _ = settings.companionEnabled
+            _ = settings.companionPeerToPeer
+            _ = settings.webCompanionEnabled
+            _ = settings.remoteCompanionEnabled
+            _ = settings.webQuickConnection
+        } onChange: {
+            Task { @MainActor [weak self] in
+                self?.updateCompanionConfiguration()
+                self?.observeCompanionSettings()
+            }
+        }
+    }
+
+    private func updateCompanionConfiguration() {
+        applyVisibilityPolicy()
+        if settings.companionEnabled {
+            if companionServer.isRunning, companionServer.peerToPeer != settings.companionPeerToPeer {
+                companionServer.stop()
+            }
+            companionServer.start(peerToPeer: settings.companionPeerToPeer)
+        } else {
+            companionServer.stop()
+        }
+        if settings.webCompanionEnabled { webCompanionServer.start(transport: settings.webQuickConnection ? .trustedLAN : .secure) }
+        else { webCompanionServer.stop() }
+        if settings.remoteCompanionEnabled { remoteCompanion.start() }
+        else { remoteCompanion.stop() }
+        if settings.companionEnabled || settings.webCompanionEnabled || settings.remoteCompanionEnabled {
+            companionPublisher.start(viewModel: viewModel, server: companionServer, webServer: webCompanionServer, remote: remoteCompanion)
+        } else { companionPublisher.stop() }
+    }
+
+    private func applyVisibilityPolicy() {
+        let policy = CaptionVisibilityPolicy(phoneOnly: settings.phoneOnlyDisplay)
+        if !policy.permitsCaptionWindows {
+            popover.performClose(nil)
+            companionServer.cancelInvitation()
+            webCompanionServer.cancelInvitation()
+            remoteCompanion.cancelInvitation()
+            for window in NSApp.windows { window.orderOut(nil) }
+            // Tear down the setup host so it cannot request language dialogs.
+            translationWindow?.close()
+            translationWindow = nil
+        } else if floatingPanel?.isVisible == false, floatingPanel?.isMiniaturized == false {
+            restoreFloatingPanel()
+        }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        if let suite = windowFixturePreferenceSuite { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        translationPreparationTask?.cancel()
+        companionPublisher.stop()
+        companionServer.stop()
+        webCompanionServer.stop()
+        remoteCompanion.stop()
+    }
+
+    /// Process-level acceptance with isolated preferences and synthetic text.
+    /// Never starts capture, discovery, hotkeys or file-based control, and
+    /// never clears the existing application's shared log.
+    private func runCompanionPrivacyCheck() {
+        let suite = "StreamTranslate.privacy-check.\(UUID())"
+        guard let defaults = UserDefaults(suiteName: suite) else { exit(1) }
+        settings = CaptionSettings(defaults: defaults)
+        settings.phoneOnlyDisplay = true
+        setupFloatingPanel()
+        updateFloatingPanelContent()
+        viewModel.addCaption(english: "Synthetic private caption", chinese: "测试私密字幕")
+        applyVisibilityPolicy()
+        openTranscriptWindow()
+        openSettingsWindow()
+        openCompanionWindow()
+        _ = applicationShouldHandleReopen(NSApp, hasVisibleWindows: false)
+        floatingPanelDidRestore()
+        viewModel.downloadProgress = 0.5
+        updateDownloadProgressWindow()
+        prepareIndependentTranslation()
+        Task { @MainActor [weak self] in
+            guard let self else { exit(1) }
+            for _ in 0..<100 {
+                if self.viewModel.isTranslationReady { break }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            let visible = NSApp.windows.filter(\.isVisible).count
+            let passed = visible == 0 && self.viewModel.isTranslationReady
+                && self.downloadProgressWindow == nil && self.translationWindow == nil
+                && CaptionSettings(defaults: defaults).phoneOnlyDisplay
+            print("PRIVATE WINDOW CHECK: visible=\(visible), independentTranslationReady=\(self.viewModel.isTranslationReady), pass=\(passed)")
+            self.translationPreparationTask?.cancel()
+            self.viewModel.translationService.cancelSessions()
+            defaults.removePersistentDomain(forName: suite)
+            exit(passed ? 0 : 1)
+        }
     }
 }

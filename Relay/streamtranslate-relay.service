@@ -1,0 +1,28 @@
+[Unit]
+Description=StreamTranslate encrypted subtitle relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=streamtranslate-relay
+Group=streamtranslate-relay
+WorkingDirectory=/opt/streamtranslate-relay
+# Replace the documentation-only IP with the same TLS host used by Nginx.
+Environment=RELAY_ORIGIN=https://192.0.2.1
+ExecStart=/usr/bin/node --max-old-space-size=96 /opt/streamtranslate-relay/server.mjs
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryMax=160M
+TasksMax=32
+LimitNOFILE=128
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
