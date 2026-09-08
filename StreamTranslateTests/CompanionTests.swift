@@ -57,7 +57,8 @@ private func companionTestRow(_ text: String = "Hello", id: UUID = UUID()) -> Co
 @Test func companionSnapshotRejectsDuplicateIDs() {
     let row = companionTestRow()
     var replica = CompanionReplica()
-    #expect(!replica.accept(.init(captions: [row, row])))
+    let accepted = replica.accept(.init(captions: [row, row]))
+    #expect(!accepted)
     #expect(replica.snapshot == nil)
 }
 
@@ -70,8 +71,10 @@ private func companionTestRow(_ text: String = "Hello", id: UUID = UUID()) -> Co
     second.captions = [row]
     let delta = CompanionDelta(previous: first, current: second)
     var replica = CompanionReplica()
-    #expect(replica.accept(first))
-    #expect(replica.apply(delta))
+    let accepted = replica.accept(first)
+    let applied = replica.apply(delta)
+    #expect(accepted)
+    #expect(applied)
     #expect(replica.snapshot?.captions.count == 1)
     #expect(replica.snapshot?.captions.first?.translation == row.translation)
 }
@@ -91,7 +94,8 @@ private func companionTestRow(_ text: String = "Hello", id: UUID = UUID()) -> Co
     second.captions.removeFirst()
     var replica = CompanionReplica()
     replica.accept(first)
-    #expect(replica.apply(.init(previous: first, current: second)))
+    let applied = replica.apply(.init(previous: first, current: second))
+    #expect(applied)
     #expect(replica.snapshot?.captions.map(\.original) == ["two"])
 }
 
@@ -101,7 +105,8 @@ private func companionTestRow(_ text: String = "Hello", id: UUID = UUID()) -> Co
     second.sequence = 12
     var replica = CompanionReplica()
     replica.accept(first)
-    #expect(!replica.apply(.init(previous: first, current: second)))
+    let applied = replica.apply(.init(previous: first, current: second))
+    #expect(!applied)
     #expect(replica.snapshot?.sequence == 10)
 }
 
@@ -112,14 +117,16 @@ private func companionTestRow(_ text: String = "Hello", id: UUID = UUID()) -> Co
     var replica = CompanionReplica()
     let newSession = CompanionSnapshot()
     replica.accept(newSession)
-    #expect(!replica.apply(.init(previous: first, current: second)))
+    let applied = replica.apply(.init(previous: first, current: second))
+    #expect(!applied)
     #expect(replica.snapshot?.sessionID == newSession.sessionID)
 }
 
 @Test func companionSnapshotClearsStreamingAndHistory() {
     var replica = CompanionReplica()
     replica.accept(.init(captions: [companionTestRow()], streaming: companionTestRow()))
-    #expect(replica.accept(.init()))
+    let accepted = replica.accept(.init())
+    #expect(accepted)
     #expect(replica.snapshot?.captions.isEmpty == true)
     #expect(replica.snapshot?.streaming == nil)
 }
@@ -130,7 +137,8 @@ private func companionTestRow(_ text: String = "Hello", id: UUID = UUID()) -> Co
     old.sequence = 19
     var replica = CompanionReplica()
     replica.accept(first)
-    #expect(!replica.accept(old))
+    let accepted = replica.accept(old)
+    #expect(!accepted)
 }
 
 private func companionTestInvitation(now: Date = Date()) throws -> CompanionInvitation {

@@ -83,6 +83,7 @@ enum NemotronBenchmarkMain {
         }
 
         var firstResult: Double?
+        var firstResultAudio: Double?
         var firstTranslationReady: Double?
         var firstText = ""
         var partialCount = 0
@@ -91,6 +92,7 @@ enum NemotronBenchmarkMain {
             let elapsed = seconds(recognitionStarted.duration(to: clock.now))
             if firstResult == nil {
                 firstResult = elapsed
+                firstResultAudio = Double(update.endSample) / 16_000
                 firstText = update.output.text
             }
             if firstTranslationReady == nil,
@@ -108,12 +110,13 @@ enum NemotronBenchmarkMain {
         let text = finals.joined(separator: " ")
         print(
             String(
-                format: "nemotron session=%d audio=%.3fs first=%.3fs "
+                format: "nemotron session=%d audio=%.3fs first=%.3fs firstAudio=%.3fs "
                     + "translationReady=%.3fs wall=%.3fs endLag=%.3fs "
                     + "partials=%d finals=%d firstText=%@ text=%@",
                 sessionIndex,
                 duration,
                 firstResult ?? -1,
+                firstResultAudio ?? -1,
                 firstTranslationReady ?? -1,
                 wall,
                 realtime ? wall - duration : wall,

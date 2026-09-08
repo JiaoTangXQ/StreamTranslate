@@ -114,9 +114,13 @@ targets:
     sources:
       - path: Tools/ASRBenchmarkMain.swift
       - path: StreamTranslate/Services/AppleStreamingTranscriptionService.swift
+      - path: StreamTranslate/Services/SpeechFinalizationPlanner.swift
       - path: StreamTranslate/Services/WhisperTranscriptionService.swift
+      - path: StreamTranslate/Models/CaptionTextStabilizer.swift
       - path: StreamTranslate/Models/TranscriptionTypes.swift
       - path: StreamTranslate/Models/SpokenLanguage.swift
+      - path: StreamTranslate/Models/TranslationDraftPlanner.swift
+      - path: StreamTranslate/Utilities/AppLogger.swift
     dependencies:
       - package: WhisperKit
         product: WhisperKit

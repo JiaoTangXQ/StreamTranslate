@@ -13,7 +13,7 @@ See [settings redesign](docs/settings-redesign-1.6.0.md),
 Relay deployment files contain **example host/account values**, not a provisioned public service.
 Model weights, credentials, machine provisioning and generated release binaries are not in this repository.
 
-StreamTranslate is a local macOS subtitle overlay for English↔Chinese meetings and media. Fixed English and Mandarin have Apple's continuous on-device speech transcriber. An optional Nemotron Metal backend offers another English streaming path; latency advantages vary by input and pipeline. WhisperKit remains available for automatic-language detection and manual multilingual recognition.
+StreamTranslate is a local macOS subtitle overlay for English↔Chinese meetings and media. Fixed English and Mandarin have Apple's continuous on-device speech transcriber. An optional Nemotron Metal backend offers another English streaming path; it can omit long stretches of far-field meeting audio that Apple Speech recognizes, so Apple remains the fixed-English default. WhisperKit remains available for automatic-language detection and manual multilingual recognition.
 
 ## Current behavior
 

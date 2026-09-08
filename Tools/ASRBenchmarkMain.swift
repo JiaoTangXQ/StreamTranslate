@@ -100,6 +100,7 @@ enum ASRBenchmarkMain {
         }
 
         var firstResultSeconds: Double?
+        var firstResultAudioSeconds: Double?
         var firstResultText: String?
         var firstTranslationReadySeconds: Double?
         var partialCount = 0
@@ -108,6 +109,7 @@ enum ASRBenchmarkMain {
             let elapsed = seconds(startedAt.duration(to: clock.now))
             if firstResultSeconds == nil {
                 firstResultSeconds = elapsed
+                firstResultAudioSeconds = Double(update.endSample) / 16_000
                 firstResultText = update.output.text
             }
             if firstTranslationReadySeconds == nil,
@@ -127,9 +129,10 @@ enum ASRBenchmarkMain {
         let lag = realtime ? wall - duration : wall
         print(
             String(
-                format: "apple first=%.3fs prefixReady=%.3fs wall=%.3fs "
+                format: "apple first=%.3fs firstAudio=%.3fs prefixReady=%.3fs wall=%.3fs "
                     + "endLag=%.3fs partials=%d finals=%d firstText=%@ text=%@",
                 firstResultSeconds ?? -1,
+                firstResultAudioSeconds ?? -1,
                 firstTranslationReadySeconds ?? -1,
                 wall,
                 lag,
