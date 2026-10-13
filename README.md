@@ -2,19 +2,21 @@
 
 StreamTranslate shows live English↔Chinese subtitles over other Mac apps. It can listen to audio playing on the Mac or to nearby speech through the microphone. Recognition and translation run on the Mac.
 
-## Preview
+## Screenshots
 
-These native 1.6.0 previews use example captions and isolated settings. They contain no meeting audio or personal data.
+**Floating subtitle window** — choose computer audio or the microphone, then start listening.
 
-**Floating subtitles** — English speech and its Chinese translation stay visible above other windows.
+![StreamTranslate floating window with audio controls](docs/screenshots/floating-window-1.6.0.png)
 
-![A floating black subtitle panel showing an English sentence and its Chinese translation](docs/screenshots/captions-1.6.0.png)
+**English→Chinese captions** — the following native preview uses example text, not a recording.
 
-**Settings** — choose the audio source and language, then adjust the subtitle display. Select either image to view it at full size.
+![An English sentence with its Chinese translation in the floating subtitle panel](docs/screenshots/captions-1.6.0.png)
 
-| Audio and language | Subtitle appearance |
-| --- | --- |
-| [![Audio source and recognition language settings](docs/screenshots/audio-language-1.6.0.png)](docs/screenshots/audio-language-1.6.0.png) | [![Subtitle preview and size settings](docs/screenshots/subtitle-appearance-1.6.0.png)](docs/screenshots/subtitle-appearance-1.6.0.png) |
+**Audio and language settings** — select the audio source, recognition language and Chinese translation style.
+
+![StreamTranslate 1.6.0 audio and language settings window](docs/screenshots/settings-window-1.6.0.png)
+
+[View subtitle appearance settings](docs/screenshots/subtitle-appearance-1.6.0.png).
 
 ## Latest update · 1.6.0
 
