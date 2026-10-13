@@ -1,5 +1,21 @@
 # StreamTranslate
 
+StreamTranslate shows live English↔Chinese subtitles over other Mac apps. It can listen to audio playing on the Mac or to nearby speech through the microphone. Recognition and translation run on the Mac.
+
+## Preview
+
+These native 1.6.0 previews use example captions and isolated settings. They contain no meeting audio or personal data.
+
+**Floating subtitles** — English speech and its Chinese translation stay visible above other windows.
+
+![A floating black subtitle panel showing an English sentence and its Chinese translation](docs/screenshots/captions-1.6.0.png)
+
+**Settings** — choose the audio source and language, then adjust the subtitle display. Select either image to view it at full size.
+
+| Audio and language | Subtitle appearance |
+| --- | --- |
+| [![Audio source and recognition language settings](docs/screenshots/audio-language-1.6.0.png)](docs/screenshots/audio-language-1.6.0.png) | [![Subtitle preview and size settings](docs/screenshots/subtitle-appearance-1.6.0.png)](docs/screenshots/subtitle-appearance-1.6.0.png) |
+
 ## Latest update · 1.6.0
 
 - Chinese dark settings with four navigation sections, live font-size preview and a resizable window.
@@ -13,7 +29,7 @@ See [settings redesign](docs/settings-redesign-1.6.0.md),
 Relay deployment files contain **example host/account values**, not a provisioned public service.
 Model weights, credentials, machine provisioning and generated release binaries are not in this repository.
 
-StreamTranslate is a local macOS subtitle overlay for English↔Chinese meetings and media. Fixed English and Mandarin have Apple's continuous on-device speech transcriber. An optional Nemotron Metal backend offers another English streaming path; it can omit long stretches of far-field meeting audio that Apple Speech recognizes, so Apple remains the fixed-English default. WhisperKit remains available for automatic-language detection and manual multilingual recognition.
+Fixed English and Mandarin have Apple's continuous on-device speech transcriber. An optional Nemotron Metal backend offers another English streaming path; it can omit long stretches of far-field meeting audio that Apple Speech recognizes, so Apple remains the fixed-English default. WhisperKit remains available for automatic-language detection and manual multilingual recognition.
 
 ## Current behavior
 
