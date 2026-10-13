@@ -6,7 +6,12 @@ project_root=${script_dir:h}
 cd "$project_root"
 
 # A macOS 26 SDK and Swift 6 toolchain are sufficient; Xcode is optional.
-swift build -c release --product StreamTranslate --disable-build-manifest-caching --jobs "${BUILD_JOBS:-4}"
+swift_flags=()
+if [[ "${REDACT_SOURCE_PATHS:-0}" == 1 ]]; then
+    swift_flags=(-Xcc "-ffile-prefix-map=$project_root=/src/StreamTranslate"
+                 -Xcxx "-ffile-prefix-map=$project_root=/src/StreamTranslate")
+fi
+swift build -c release --product StreamTranslate --disable-build-manifest-caching --jobs "${BUILD_JOBS:-4}" "${swift_flags[@]}"
 bin_dir=$(swift build -c release --show-bin-path)
 app="$project_root/build/StreamTranslate.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"

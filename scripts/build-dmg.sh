@@ -14,7 +14,7 @@ mkdir -p "$output_dir"
 free_kb=$(df -k "$output_dir" | tail -1 | awk '{print $4}')
 (( free_kb > 10 * 1024 * 1024 )) || { print -u2 'Need at least 10 GiB free in output directory'; exit 1; }
 cd "$project_root"
-zsh scripts/build-app.sh
+REDACT_SOURCE_PATHS=1 zsh scripts/build-app.sh
 version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' build/StreamTranslate.app/Contents/Info.plist)
 build=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' build/StreamTranslate.app/Contents/Info.plist)
 label=Local-Unnotarized
@@ -52,6 +52,7 @@ payload="$mount_dir/payload"
 app="$payload/StreamTranslate.app"
 mkdir -p "$payload"
 ditto --norsrc --noextattr build/StreamTranslate.app "$app"
+strip -S -x "$app/Contents/MacOS/StreamTranslate"
 mkdir -p "$app/Contents/Helpers/Qwen" "$app/Contents/Helpers/HyMT" \
     "$app/Contents/Resources/Models" "$app/Contents/Resources/Licenses"
 for name in Qwen HyMT; do
@@ -88,7 +89,7 @@ for binary in "$app/Contents/Helpers/"*/*; do
     codesign "${sign_options[@]}" "$binary"
 done
 codesign "${sign_options[@]}" --entitlements StreamTranslate/Resources/StreamTranslate.entitlements "$app"
-python3 Tools/verify_distribution.py "$app" > "$output_dir/$stem.audit.json"
+/usr/bin/python3 Tools/verify_distribution.py "$app" > "$output_dir/$stem.audit.json"
 ditto docs/dmg-install-zh.txt "$payload/安装说明.txt"
 ln -s /Applications "$payload/Applications"
 hdiutil create -volname 'StreamTranslate' -srcfolder "$payload" -format UDZO \

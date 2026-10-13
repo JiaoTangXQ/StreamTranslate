@@ -1,4 +1,4 @@
-StreamTranslate 1.2.1 — Mac 完整模型版
+StreamTranslate 1.6.0 — Mac 完整模型版
 
 安装
 1. 将 StreamTranslate.app 拖到旁边的 Applications（应用程序）文件夹。
