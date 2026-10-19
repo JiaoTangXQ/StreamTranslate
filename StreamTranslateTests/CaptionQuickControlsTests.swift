@@ -1,5 +1,7 @@
 import Foundation
 import Testing
+import Observation
+import Synchronization
 @testable import StreamTranslate
 
 @Test @MainActor func readingControlsKeepALegibleMinimumWindowHeight() {
@@ -12,7 +14,7 @@ import Testing
 
 @Test func captionControlsHideOnlyAfterIdleAndStayDuringInteraction() {
     let start = Date(timeIntervalSince1970: 100)
-    var state = CaptionControlsVisibility()
+    let state = CaptionControlsVisibility()
     state.reveal(at: start)
     state.update(at: start.addingTimeInterval(2.9), keepVisible: false)
     #expect(state.isVisible)
@@ -26,6 +28,39 @@ import Testing
     #expect(state.isVisible)
     state.update(at: start.addingTimeInterval(24), keepVisible: false)
     #expect(!state.isVisible)
+}
+
+@Test func captionHoverAndIdleTicksDoNotInvalidateVisibleContent() {
+    let state = CaptionControlsVisibility()
+    let changes = Mutex(0)
+    let start = Date(timeIntervalSince1970: 100)
+    withObservationTracking {
+        _ = state.isVisible
+    } onChange: {
+        changes.withLock { $0 += 1 }
+    }
+    for index in 0..<1_000 {
+        state.reveal(at: start.addingTimeInterval(Double(index) / 100))
+        state.update(at: start.addingTimeInterval(Double(index) / 100), keepVisible: true)
+    }
+    #expect(changes.withLock { $0 } == 0)
+    state.update(at: start.addingTimeInterval(20), keepVisible: false)
+    #expect(changes.withLock { $0 } == 1)
+    #expect(!state.isVisible)
+
+    let hiddenChanges = Mutex(0)
+    withObservationTracking {
+        _ = state.isVisible
+    } onChange: {
+        hiddenChanges.withLock { $0 += 1 }
+    }
+    for index in 0..<100 {
+        state.update(at: start.addingTimeInterval(21 + Double(index)), keepVisible: false)
+    }
+    #expect(hiddenChanges.withLock { $0 } == 0)
+    state.reveal(at: start.addingTimeInterval(200))
+    #expect(hiddenChanges.withLock { $0 } == 1)
+    #expect(state.isVisible)
 }
 
 @Test @MainActor func quickSourceSelectionWhileIdleDoesNotStartCaptureOrLoseHistory() async {

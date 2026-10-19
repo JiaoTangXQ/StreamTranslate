@@ -29,11 +29,13 @@ struct FloatingCaptionView: View {
     @State private var autoScrollState = CaptionAutoScrollState()
     @State private var controls = CaptionControlsVisibility()
     @State private var interactingWithControls = false
+    @State private var viewportSize = CGSize.zero
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     let onMinimize: () -> Void
     var onSettings: () -> Void = {}
     var onPhone: () -> Void = {}
+    var onHistory: () -> Void = {}
 
     private var controlsVisible: Bool {
         controls.isVisible || !viewModel.isRecording || viewModel.isChangingCaptureConfiguration
@@ -55,6 +57,9 @@ struct FloatingCaptionView: View {
         VStack(spacing: 0) {
             ScrollViewReader { proxy in
                 ScrollView(.vertical) {
+                    // The live history is capped at 100 rows. Eager layout of
+                    // this bounded slice keeps bottom-following accurate with
+                    // variable-height selectable text, including after resize.
                     VStack(alignment: .leading, spacing: 14) {
                         if viewModel.captionHistory.isEmpty && !viewModel.hasStreamingText {
                             VStack(alignment: .leading, spacing: 5) {
@@ -65,7 +70,7 @@ struct FloatingCaptionView: View {
                             }
                         }
                         // All completed captions (scrollable history)
-                        ForEach(viewModel.captionHistory) { entry in
+                        ForEach(viewModel.floatingCaptionHistory) { entry in
                             let isLatest = entry.id == viewModel.captionHistory.last?.id
                                 && !viewModel.hasStreamingText
                             captionPair(
@@ -97,6 +102,7 @@ struct FloatingCaptionView: View {
                     .textSelection(.enabled)
                 }
                 .scrollIndicators(.hidden)
+                .onGeometryChange(for: CGSize.self) { $0.size } action: { viewportSize = $0 }
                 .onScrollPhaseChange { _, newPhase, context in
                     switch newPhase {
                     case .tracking, .interacting, .decelerating:
@@ -109,8 +115,9 @@ struct FloatingCaptionView: View {
                         break
                     }
                 }
-                .task {
+                .task(id: viewportSize) {
                     await Task.yield()
+                    guard !Task.isCancelled, autoScrollState.shouldFollowContentChanges else { return }
                     proxy.scrollTo(Self.bottomID, anchor: .bottom)
                 }
                 .onChange(of: contentRevision) {
@@ -141,7 +148,8 @@ struct FloatingCaptionView: View {
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .overlay(alignment: .bottom) {
             CaptionQuickControls(onEngagement: { interactingWithControls = $0 },
-                onSettings: onSettings, onPhone: onPhone, onMinimize: onMinimize)
+                onSettings: onSettings, onPhone: onPhone, onMinimize: onMinimize,
+                onHistory: onHistory)
                 .padding(8)
                 .opacity(controlsVisible ? 1 : 0)
                 .allowsHitTesting(controlsVisible)

@@ -176,6 +176,7 @@ final class CaptionViewModel {
     @ObservationIgnored private var captureStopTask: Task<Void, Never>?
     @ObservationIgnored private var quickResumeRequested = false
     @ObservationIgnored private var captureStartGeneration = 0
+    @ObservationIgnored private var finalizingCaptureGeneration: Int?
     var isLoading = false
     var isModelReady = false
     var isPreparingTranslation = false
@@ -192,6 +193,14 @@ final class CaptionViewModel {
     var streamingDraftOriginal = ""
 
     var captionHistory: [CaptionEntry] = []
+    static let maximumFloatingHistory = 100
+    var floatingCaptionHistory: ArraySlice<CaptionEntry> {
+        captionHistory.suffix(Self.maximumFloatingHistory - (hasStreamingText ? 1 : 0))
+    }
+    let historyStore: CaptionHistoryStore?
+    @ObservationIgnored private var captionArchiveSessions: [UUID: (UUID, Date)] = [:]
+    @ObservationIgnored private var captionWorkCounts: [UUID: Int] = [:]
+    @ObservationIgnored private var retainedCaptionUpdates: [UUID: CaptionEntry] = [:]
     var recentCaptions: [CaptionEntry] = []
     private(set) var historyRevision = 0
     private(set) var companionSessionID = UUID()
@@ -264,6 +273,10 @@ final class CaptionViewModel {
     private var activeModel = ASRModel.defaultModel
 
     // MARK: - Lifecycle
+
+    init(historyStore: CaptionHistoryStore? = nil) {
+        self.historyStore = historyStore
+    }
 
     func preloadModel(modelId: String = ASRModel.defaultModel.id) {
         guard !isModelReady, !isLoading else { return }
@@ -420,6 +433,9 @@ final class CaptionViewModel {
         finalTranslationWorkerID = nil
         pendingFinalTranslations = []
         captionHistory = []
+        captionArchiveSessions = [:]
+        captionWorkCounts = [:]
+        retainedCaptionUpdates = [:]
         recentCaptions = []
         historyRevision += 1
         clearStreamingState()
@@ -611,6 +627,7 @@ final class CaptionViewModel {
         }
 
         isRecording = false
+        finalizingCaptureGeneration = nil
         memoryPressureMonitor?.cancel()
         memoryPressureMonitor = nil
         memoryPressureMonitorID = nil
@@ -654,6 +671,7 @@ final class CaptionViewModel {
 
     private func stopStreamingCaptureGracefully() {
         guard isRecording, !isFinalizingCapture else { return }
+        finalizingCaptureGeneration = captureStartGeneration - 1
         isRecording = false
         isFinalizingCapture = true
         statusMessage = "Finalizing last words..."
@@ -699,6 +717,7 @@ final class CaptionViewModel {
             audioReviewTap?.cancel()
             audioReviewTap = nil
             logger?.finish()
+            finalizingCaptureGeneration = nil
             isFinalizingCapture = false
             if statusMessage == "Finalizing last words..." {
                 statusMessage = ""
@@ -771,32 +790,45 @@ final class CaptionViewModel {
         )
         startPartialTranslationWorker(translationQueue, logger: logger)
 
+        startNativeStreamingUpdates(transcription.updates(from: recognitionAudio,
+            vocabulary: activeRecognitionVocabulary), logger: logger, partialTranslations: translationQueue)
+    }
+
+    func startNativeStreamingUpdates(_ updates: AsyncThrowingStream<StreamingTranscriptionUpdate, Error>,
+        logger: MeetingSessionLogger?, partialTranslations: PartialTranslationQueue) {
+        let generation = captureStartGeneration
         pipelineTask = Task { [weak self] in
-            do {
-                let updates = transcription.updates(
-                    from: recognitionAudio,
-                    vocabulary: self?.activeRecognitionVocabulary ?? ""
-                )
-                for try await update in updates {
-                    guard !Task.isCancelled, let self else { break }
-                    await self.processStreamingUpdate(
-                        update,
-                        logger: logger,
-                        partialTranslations: translationQueue
-                    )
-                }
-            } catch is CancellationError {
-                return
-            } catch {
-                guard let self else { return }
-                let details = Self.describe(error)
-                self.statusMessage = "Transcription error: \(error.localizedDescription)"
-                AppLogger.log(
-                    "Native streaming transcription failed "
-                        + "[\(self.activeModel.backend.rawValue)]: \(details)"
-                )
-            }
+            await self?.consumeNativeStreamingUpdates(updates, logger: logger,
+                partialTranslations: partialTranslations, captureGeneration: generation)
         }
+    }
+
+    /// A terminated recognizer must not leave the capture and controls claiming
+    /// to be running. Generation guards keep an old session from stopping a new one.
+    func consumeNativeStreamingUpdates(
+        _ updates: AsyncThrowingStream<StreamingTranscriptionUpdate, Error>,
+        logger: MeetingSessionLogger?, partialTranslations: PartialTranslationQueue,
+        captureGeneration: Int
+    ) async {
+        var failure = "语音识别意外结束，请重新开始。"
+        do {
+            for try await update in updates {
+                guard !Task.isCancelled,
+                      captureGeneration == captureStartGeneration
+                        || captureGeneration == finalizingCaptureGeneration else { return }
+                await processStreamingUpdate(update, logger: logger, partialTranslations: partialTranslations)
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            guard !Task.isCancelled else { return }
+            failure = "语音识别已中断，请重新开始：\(Self.describe(error))"
+        }
+        guard !Task.isCancelled, isRecording, captureGeneration == captureStartGeneration else { return }
+        logger?.recordPipelineStatus("recognition_terminated", detail: failure)
+        AppLogger.log("Native streaming transcription terminated [\(activeModel.backend.rawValue)]: \(failure)")
+        stopCapture(gracefully: false)
+        statusMessage = failure
     }
 
     private func runWhisperPipeline(
@@ -1286,7 +1318,10 @@ final class CaptionViewModel {
            let contextSamples = reviewAudio?.contextualSlice(start: segment.startSample, end: segment.endSample) {
             // At most one running and two queued reviews. A busy verifier must
             // never accumulate seconds of stale work or block live captions.
-            if pendingRecognitionReviews.count == 2 { pendingRecognitionReviews.removeFirst() }
+            if pendingRecognitionReviews.count == 2 {
+                releaseCaptionWork(pendingRecognitionReviews.removeFirst().0.entryID)
+            }
+            retainCaptionWork(request.entryID)
             pendingRecognitionReviews.append((request, samples, contextSamples))
             startRecognitionReviewWorker(reviewer)
         }
@@ -1306,6 +1341,7 @@ final class CaptionViewModel {
         recognitionReviewWorker = Task { [weak self] in
             while !Task.isCancelled, let self, !self.pendingRecognitionReviews.isEmpty {
                 let (request, samples, contextSamples) = self.pendingRecognitionReviews.removeFirst()
+                defer { self.releaseCaptionWork(request.entryID) }
                 guard request.generation == self.captionGeneration else { continue }
                 let began = Date()
                 do {
@@ -1318,7 +1354,7 @@ final class CaptionViewModel {
                           let revised = RecognitionReviewPolicy.consensus(primary: primary, contextual: contextual,
                             original: request.sourceText, language: request.output.language, priorHypothesis: request.corroboratingOriginal),
                           revised != request.sourceText,
-                          let entry = self.captionHistory.first(where: { $0.id == request.entryID }),
+                          let entry = self.captionForUpdate(request.entryID),
                           entry.originalText == request.sourceText else { continue }
                     self.updateCaption(id: entry.id,
                         english: request.output.language == .english ? revised : entry.englishText,
@@ -1346,6 +1382,7 @@ final class CaptionViewModel {
         recognitionReviewWorker?.cancel()
         recognitionReviewWorker = nil
         recognitionReviewWorkerID = nil
+        for (request, _, _) in pendingRecognitionReviews { releaseCaptionWork(request.entryID) }
         pendingRecognitionReviews = []
         if stopService {
             reviewService?.cancel()
@@ -1355,6 +1392,7 @@ final class CaptionViewModel {
     }
 
     private func enqueueFinalTranslation(_ request: FinalTranslationRequest) {
+        retainCaptionWork(request.entryID)
         pendingFinalTranslations.append(request)
         startFinalTranslationWorkerIfNeeded()
     }
@@ -1394,7 +1432,11 @@ final class CaptionViewModel {
 
     private func takeNextFinalTranslationBatch() -> [FinalTranslationRequest]? {
         pendingFinalTranslations.removeAll {
-            $0.generation != captionGeneration || !isCurrentFinalTranslation($0)
+            if $0.generation != captionGeneration || !isCurrentFinalTranslation($0) {
+                releaseCaptionWork($0.entryID)
+                return true
+            }
+            return false
         }
         guard let direction = pendingFinalTranslations.first?.direction else {
             return nil
@@ -1407,6 +1449,7 @@ final class CaptionViewModel {
     private func processFinalTranslationBatch(
         _ batch: [FinalTranslationRequest]
     ) async {
+        defer { for request in batch { releaseCaptionWork(request.entryID) } }
         guard let direction = batch.first?.direction else { return }
         let byID = Dictionary(uniqueKeysWithValues: batch.map { ($0.entryID, $0) })
         do {
@@ -1528,8 +1571,14 @@ final class CaptionViewModel {
 
     func enqueueTranslationRefinement(_ request: FinalTranslationRequest) {
         guard let refiner = translationRefiner, refiner.isReady else { return }
-        pendingTranslationRefinements.removeAll { $0.entryID == request.entryID }
-        if pendingTranslationRefinements.count == 2 { pendingTranslationRefinements.removeFirst() }
+        pendingTranslationRefinements.removeAll {
+            if $0.entryID == request.entryID { releaseCaptionWork($0.entryID); return true }
+            return false
+        }
+        if pendingTranslationRefinements.count == 2 {
+            releaseCaptionWork(pendingTranslationRefinements.removeFirst().entryID)
+        }
+        retainCaptionWork(request.entryID)
         pendingTranslationRefinements.append(request)
         guard translationRefinementWorker == nil else { return }
         let workerID = UUID()
@@ -1541,6 +1590,7 @@ final class CaptionViewModel {
                 if let review = self.recognitionReviewWorker { await review.value }
                 guard !Task.isCancelled, !self.pendingTranslationRefinements.isEmpty else { break }
                 let request = self.pendingTranslationRefinements.removeFirst()
+                defer { self.releaseCaptionWork(request.entryID) }
                 guard self.isCurrentFinalTranslation(request) else { continue }
                 let target = UserDefaults.standard.string(forKey: "translationTarget")
                     .flatMap(TranslationTarget.init(rawValue:)) ?? .simplifiedChinese
@@ -1574,6 +1624,7 @@ final class CaptionViewModel {
         translationRefinementWorker?.cancel()
         translationRefinementWorker = nil
         translationRefinementWorkerID = nil
+        for request in pendingTranslationRefinements { releaseCaptionWork(request.entryID) }
         pendingTranslationRefinements = []
         if stopService {
             translationRefiner?.cancel()
@@ -1583,7 +1634,7 @@ final class CaptionViewModel {
 
     private func isCurrentFinalTranslation(_ request: FinalTranslationRequest) -> Bool {
         request.generation == captionGeneration
-            && captionHistory.first(where: { $0.id == request.entryID })?.originalText == request.sourceText
+            && captionForUpdate(request.entryID)?.originalText == request.sourceText
     }
 
     private func recognizePartial(
@@ -1853,6 +1904,18 @@ final class CaptionViewModel {
 
     private func appendCaption(_ entry: CaptionEntry) {
         captionHistory.append(entry)
+        if historyStore != nil {
+            captionArchiveSessions[entry.id] = (companionSessionID, companionSessionStartedAt)
+        }
+        historyStore?.record(entry, sessionID: companionSessionID, startedAt: companionSessionStartedAt)
+        if captionHistory.count > Self.maximumFloatingHistory {
+            let removed = captionHistory.prefix(captionHistory.count - Self.maximumFloatingHistory)
+            for old in removed where captionWorkCounts[old.id] == nil {
+                captionArchiveSessions.removeValue(forKey: old.id)
+                refinedSources.removeValue(forKey: old.id)
+            }
+            captionHistory.removeFirst(captionHistory.count - Self.maximumFloatingHistory)
+        }
         historyRevision += 1
         recentCaptions.append(entry)
         while recentCaptions.count > maxRecentCaptions {
@@ -1867,10 +1930,7 @@ final class CaptionViewModel {
         chinese: String,
         sourceLanguage: SpokenLanguage
     ) {
-        guard let historyIndex = captionHistory.firstIndex(where: { $0.id == id }) else {
-            return
-        }
-        let previous = captionHistory[historyIndex]
+        guard let previous = captionForUpdate(id) else { return }
         let updated = CaptionEntry(
             id: id,
             timestamp: previous.timestamp,
@@ -1878,10 +1938,38 @@ final class CaptionViewModel {
             chineseText: chinese,
             sourceLanguage: sourceLanguage
         )
-        captionHistory[historyIndex] = updated
+        if let historyIndex = captionHistory.firstIndex(where: { $0.id == id }) {
+            captionHistory[historyIndex] = updated
+        }
+        if captionWorkCounts[id] != nil { retainedCaptionUpdates[id] = updated }
+        // An old sentence may finish translating after a new recording starts.
+        // Its archive session belongs to the sentence, not the current capture.
+        let session = captionArchiveSessions[id] ?? (companionSessionID, companionSessionStartedAt)
+        historyStore?.record(updated, sessionID: session.0, startedAt: session.1)
         historyRevision += 1
         if let recentIndex = recentCaptions.firstIndex(where: { $0.id == id }) {
             recentCaptions[recentIndex] = updated
+        }
+    }
+
+    private func captionForUpdate(_ id: UUID) -> CaptionEntry? {
+        captionHistory.first(where: { $0.id == id }) ?? retainedCaptionUpdates[id]
+    }
+
+    private func retainCaptionWork(_ id: UUID) {
+        guard let entry = captionForUpdate(id) else { return }
+        captionWorkCounts[id, default: 0] += 1
+        retainedCaptionUpdates[id] = entry
+    }
+
+    private func releaseCaptionWork(_ id: UUID) {
+        guard let count = captionWorkCounts[id] else { return }
+        if count > 1 { captionWorkCounts[id] = count - 1; return }
+        captionWorkCounts.removeValue(forKey: id)
+        retainedCaptionUpdates.removeValue(forKey: id)
+        if !captionHistory.contains(where: { $0.id == id }) {
+            captionArchiveSessions.removeValue(forKey: id)
+            refinedSources.removeValue(forKey: id)
         }
     }
 

@@ -62,7 +62,7 @@ import Foundation
     #expect(vm.recentCaptions[1].englishText == "Three")
 }
 
-@Test @MainActor func historyGrowsUnbounded() {
+@Test @MainActor func historyKeepsEntriesBelowLiveLimit() {
     let vm = CaptionViewModel()
     for i in 0..<10 {
         vm.addCaption(english: "Line \(i)", chinese: "行 \(i)")

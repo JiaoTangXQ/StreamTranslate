@@ -18,14 +18,16 @@ StreamTranslate shows live English↔Chinese subtitles over other Mac apps. It c
 
 [View subtitle appearance settings](docs/screenshots/subtitle-appearance-1.6.0.png).
 
-## Latest update · 1.6.0
+## Latest update · 1.6.1
 
-- Chinese dark settings with four navigation sections, live font-size preview and a resizable window.
-- New black/white/red macOS app icon, included in source builds and future DMGs.
-- Private phone captions over a trusted LAN or an explicitly enabled HTTPS relay; audio and models stay on the Mac.
-- Home Screen authorization recovery, saved-link handling and in-place re-pairing for the remote reader.
+- The live caption cache retains at most 100 completed captions; the floating window shows up to 99 plus the current streaming caption.
+- Complete caption text is saved under `~/Library/Application Support/StreamTranslate/TranscriptHistory/` across relaunches, including late updates after a caption leaves the live window. The archive contains no audio.
+- Open saved sessions from the floating clock button or **查看历史记录…** in the menu. **清空全部记录** deletes the archive and clears current captions; diagnostic logs remain separate.
+- Native recognition errors and ended result streams stop capture and update the running state; normal stop still waits for final words and translations.
 
-See [settings redesign](docs/settings-redesign-1.6.0.md),
+History starts with this version; older diagnostic sessions are not imported. See
+[long-session history and verification limits](docs/long-session-history-1.6.1.md),
+[settings redesign](docs/settings-redesign-1.6.0.md),
 [remote phone setup](docs/remote-companion-1.5.0.md) and
 [Home Screen recovery](docs/bookmark-recovery-1.5.1.md).
 Relay deployment files contain **example host/account values**, not a provisioned public service.
@@ -173,13 +175,15 @@ xcodebuild test \
   CODE_SIGNING_ALLOWED=NO
 ```
 
-The current suite contains 213 tests. On a CLT-only Mac, run the core test bodies using the explicit sequential assertion adapter:
+For the 1.6.1 local verification, 326 tests passed with `swift test --no-parallel --skip 'AppLoggerTests|companionInstalledTranslationRunsWithoutAnyWindow'`. The seven shared-log tests were excluded to preserve diagnostic evidence; the installed-assets translation test reported `notInstalled` in the test process. See [verification limits](docs/long-session-history-1.6.1.md).
+
+On a CLT-only Mac, run the core test bodies using the explicit sequential assertion adapter:
 
 ```bash
 python3 Tools/run_portable_tests.py
 ```
 
-This is not the Swift Testing runner. It runs 165 core test bodies and reports the four excluded UI/shared-log files (48 tests); full Xcode tests and real UI/capture checks remain separate.
+This is not the Swift Testing runner. It reports the core test bodies it executes and the four excluded UI/shared-log files; full Xcode tests and real UI/capture checks remain separate.
 
 To exercise the production Chinese recognizer, caption state and installed translation assets without capturing live audio:
 

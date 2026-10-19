@@ -48,7 +48,8 @@ final class AppWindowSlot: NSObject, NSWindowDelegate {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
-    private var viewModel = CaptionViewModel()
+    private let historyStore = CaptionHistoryStore()
+    private lazy var viewModel = CaptionViewModel(historyStore: historyStore)
     /// Use the same state for the standard macOS Settings command (⌘,) and
     /// the menu-bar settings window; the scene must not be an empty placeholder.
     var settingsContent: some View {
@@ -134,6 +135,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Listen for distributed notification to toggle recording (for testing/automation)
     private func runWindowInteractionFixture() {
+        viewModel = CaptionViewModel()
         let suite = "StreamTranslate.window-interaction.\(UUID())"
         windowFixturePreferenceSuite = suite
         let defaults = UserDefaults(suiteName: suite)!
@@ -271,7 +273,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let content = FloatingCaptionView(
             onMinimize: { [weak self] in self?.minimizeFloatingPanel() },
             onSettings: { [weak self] in self?.openSettingsWindow() },
-            onPhone: { [weak self] in self?.openCompanionWindow() })
+            onPhone: { [weak self] in self?.openCompanionWindow() },
+            onHistory: { [weak self] in self?.openTranscriptWindow() })
             .environment(viewModel)
             .environment(settings)
         floatingPanel?.contentView = FloatingPanelHostingView(rootView: content)
@@ -498,18 +501,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func openTranscriptWindow() {
         guard !settings.phoneOnlyDisplay else { return }
-        transcriptWindowSlot.show { [viewModel, settings] in
+        popover.performClose(nil)
+        transcriptWindowSlot.show { [viewModel, historyStore] in
             let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 600, height: 500),
+                contentRect: NSRect(x: 0, y: 0, width: 820, height: 560),
                 styleMask: [.titled, .closable, .resizable, .miniaturizable],
                 backing: .buffered,
                 defer: false
             )
-            window.title = "StreamTranslate"
+            window.title = "StreamTranslate — 历史记录"
+            window.minSize = NSSize(width: 640, height: 400)
+            window.level = .floating + 1
             window.contentView = NSHostingView(
-                rootView: MainWindowView()
+                rootView: CaptionHistoryView(store: historyStore)
                     .environment(viewModel)
-                    .environment(settings)
             )
             window.center()
             return window
@@ -588,6 +593,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        historyStore.finishPendingWrites()
         if let suite = windowFixturePreferenceSuite { UserDefaults.standard.removePersistentDomain(forName: suite) }
         translationPreparationTask?.cancel()
         companionPublisher.stop()
@@ -600,6 +606,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Never starts capture, discovery, hotkeys or file-based control, and
     /// never clears the existing application's shared log.
     private func runCompanionPrivacyCheck() {
+        viewModel = CaptionViewModel()
         let suite = "StreamTranslate.privacy-check.\(UUID())"
         guard let defaults = UserDefaults(suiteName: suite) else { exit(1) }
         settings = CaptionSettings(defaults: defaults)

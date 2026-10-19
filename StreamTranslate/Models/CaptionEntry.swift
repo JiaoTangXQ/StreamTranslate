@@ -1,6 +1,6 @@
 import Foundation
 
-struct CaptionEntry: Identifiable {
+struct CaptionEntry: Identifiable, Codable, Sendable {
     let id: UUID
     let timestamp: Date
     let englishText: String

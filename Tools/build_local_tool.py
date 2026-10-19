@@ -16,14 +16,17 @@ def build_tool(entry: Path, output: Path):
     generated = output.parent/'AppWithoutEntry.swift'
     generated.write_text(app.read_text().replace('@main\n', '', 1))
     sources = [p for p in (ROOT/'StreamTranslate').rglob('*.swift') if p != app]
-    objects = [p for target in ['WhisperKit','ArgmaxCore','NemotronBridge']
+    objects = [p for target in ['WhisperKit','ArgmaxCore','NemotronBridge','CompanionKit',
+                               'X509','SwiftASN1','_CertificateInternals','Crypto',
+                               'CryptoExtras','_CryptoExtras','CryptoBoringWrapper',
+                               'CCryptoBoringSSL','CCryptoBoringSSLShims']
                for p in (bin_dir/(target+'.build')).rglob('*.o')]
     subprocess.run(['swiftc','-O','-whole-module-optimization','-parse-as-library','-swift-version','6',
                     '-D','SWIFT_PACKAGE','-module-name','StreamTranslate',
                     '-target','arm64-apple-macosx26.0',
                     '-I',str(bin_dir/'Modules'),'-I',str(bin_dir/'NemotronBridge.build'),
                     *map(str,sources),str(generated),str(entry),*map(str,objects),
-                    '-o',str(output)],cwd=ROOT,check=True)
+                    '-lc++','-o',str(output)],cwd=ROOT,check=True)
 
 if __name__ == '__main__':
     if len(sys.argv) != 3:

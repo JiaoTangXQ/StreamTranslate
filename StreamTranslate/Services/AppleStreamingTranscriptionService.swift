@@ -87,45 +87,57 @@ final class AppleStreamingTranscriptionService: StreamingTranscriptionProviding,
                     let finalization = boundedFinalization ? SpeechFinalizationPlanner() : nil
 
                     let resultTask = Task {
-                        for try await result in transcriber.results {
-                            guard !Task.isCancelled else { return }
-                            let text = String(result.text.characters)
-                                .trimmingCharacters(in: .whitespacesAndNewlines)
-                            guard !text.isEmpty,
-                                  !TranscriptionTextPolicy.isNonSpeechOnly(text),
-                                  !TranscriptionTextPolicy.isDegenerateRepetition(text) else {
-                                continue
-                            }
+                        do {
+                            for try await result in transcriber.results {
+                                guard !Task.isCancelled else { return }
+                                let text = String(result.text.characters)
+                                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                                guard !text.isEmpty,
+                                      !TranscriptionTextPolicy.isNonSpeechOnly(text),
+                                      !TranscriptionTextPolicy.isDegenerateRepetition(text) else {
+                                    continue
+                                }
 
-                            let start = max(
-                                0,
-                                Int64((CMTimeGetSeconds(result.range.start)
-                                    * Self.sampleRate).rounded())
-                            )
-                            let end = max(
-                                start,
-                                Int64((CMTimeGetSeconds(result.range.end)
-                                    * Self.sampleRate).rounded())
-                            )
-                            let audioEnd = CMTimeGetSeconds(result.range.end)
-                            finalization?.recognized(through: end, isFinal: result.isFinal, text: text)
-                            let finalizedAt = CMTimeGetSeconds(
-                                result.resultsFinalizationTime
-                            )
-                            continuation.yield(
-                                StreamingTranscriptionUpdate(
-                                    output: TranscriptionOutput(
-                                        text: text,
-                                        language: language,
-                                        reportedLanguageCode: language.rawValue,
-                                        words: []
-                                    ),
-                                    startSample: start,
-                                    endSample: end,
-                                    isFinal: result.isFinal,
-                                    processingLatency: max(0, finalizedAt - audioEnd)
+                                let start = max(
+                                    0,
+                                    Int64((CMTimeGetSeconds(result.range.start)
+                                        * Self.sampleRate).rounded())
                                 )
-                            )
+                                let end = max(
+                                    start,
+                                    Int64((CMTimeGetSeconds(result.range.end)
+                                        * Self.sampleRate).rounded())
+                                )
+                                let audioEnd = CMTimeGetSeconds(result.range.end)
+                                finalization?.recognized(through: end, isFinal: result.isFinal, text: text)
+                                let finalizedAt = CMTimeGetSeconds(
+                                    result.resultsFinalizationTime
+                                )
+                                continuation.yield(
+                                    StreamingTranscriptionUpdate(
+                                        output: TranscriptionOutput(
+                                            text: text,
+                                            language: language,
+                                            reportedLanguageCode: language.rawValue,
+                                            words: []
+                                        ),
+                                        startSample: start,
+                                        endSample: end,
+                                        isFinal: result.isFinal,
+                                        processingLatency: max(0, finalizedAt - audioEnd)
+                                    )
+                                )
+                            }
+                            // A clean EOF can also precede the end of continuous
+                            // audio. Let the consumer retire that capture now.
+                            continuation.finish()
+                        } catch {
+                            // Report a failed result stream immediately. Waiting
+                            // for the continuous audio input to end hides this
+                            // error indefinitely while capture still looks active.
+                            continuation.finish(throwing: error)
+                            await analyzer.cancelAndFinishNow()
+                            throw error
                         }
                     }
 

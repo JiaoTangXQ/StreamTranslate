@@ -1,12 +1,18 @@
 import SwiftUI
 
-struct CaptionControlsVisibility {
+@Observable
+final class CaptionControlsVisibility {
     private(set) var isVisible = true
-    private var lastActivity = Date()
-    mutating func reveal(at date: Date = .now) { lastActivity = date; isVisible = true }
-    mutating func update(at date: Date = .now, keepVisible: Bool) {
+    // Pointer timestamps are bookkeeping, not display state. Observing them
+    // invalidated the entire caption view on every hover event and timer tick.
+    @ObservationIgnored private var lastActivity = Date()
+    func reveal(at date: Date = .now) {
+        lastActivity = date
+        if !isVisible { isVisible = true }
+    }
+    func update(at date: Date = .now, keepVisible: Bool) {
         if keepVisible { reveal(at: date) }
-        else if date.timeIntervalSince(lastActivity) >= 3 { isVisible = false }
+        else if isVisible, date.timeIntervalSince(lastActivity) >= 3 { isVisible = false }
     }
 }
 
@@ -23,6 +29,7 @@ struct CaptionQuickControls: View {
     let onSettings: () -> Void
     let onPhone: () -> Void
     let onMinimize: () -> Void
+    var onHistory: () -> Void = {}
 
     private var switchingDisabled: Bool {
         viewModel.isChangingCaptureConfiguration || viewModel.isStartingCapture
@@ -34,6 +41,7 @@ struct CaptionQuickControls: View {
             || viewModel.isLoading || !viewModel.isTranslationReady
     }
     private var feedback: String {
+        if let error = viewModel.historyStore?.errorMessage { return error }
         if !viewModel.quickControlMessage.isEmpty { return viewModel.quickControlMessage }
         return viewModel.isRecording ? "" : viewModel.statusMessage
     }
@@ -76,9 +84,14 @@ struct CaptionQuickControls: View {
             source(.systemAudio, title: "电脑音频", icon: "desktopcomputer", compact: compact)
             Button { languageOpen.toggle() } label: {
                 HStack(spacing: 3) {
-                    Text(settings.recognitionLanguageMode == .english ? "英文" : settings.recognitionLanguageMode.displayName)
-                    Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
-                }.font(.system(size: 12, weight: .medium)).frame(minHeight: 32).padding(.horizontal, 6)
+                    if compact {
+                        Image(systemName: "character.bubble").frame(width: 30)
+                    } else {
+                        Text(settings.recognitionLanguageMode == .english ? "英文" : settings.recognitionLanguageMode.displayName)
+                        Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
+                    }
+                }.font(.system(size: 12, weight: .medium)).frame(minHeight: 32)
+                    .padding(.horizontal, compact ? 0 : 6)
             }
             .buttonStyle(.plain).focused($focused, equals: "language")
             .help("识别语言：自动 / 中文 / 英文")
@@ -104,6 +117,7 @@ struct CaptionQuickControls: View {
                 }.padding(16).frame(width: 250)
             }
             Spacer(minLength: 0)
+            action("查看历史记录", icon: "clock.arrow.circlepath", perform: onHistory)
             action("在手机看字幕", icon: "iphone", perform: onPhone)
             action("更多设置", icon: "slider.horizontal.3", perform: onSettings)
             action("最小化", icon: "minus", perform: onMinimize)

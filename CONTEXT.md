@@ -2,6 +2,33 @@
 
 ## Product boundary
 
+### Bounded live captions and saved history (1.6.1 / build 21)
+
+The live `CaptionViewModel.captionHistory` retains at most 100 completed entries;
+the floating window shows 99 plus the streaming entry while speech is in progress.
+Pending translation/review/refinement work retains its own caption until all users
+release it, so eviction never drops a late correction from the saved record.
+`CaptionHistoryStore` appends text-only journals under Application Support,
+`StreamTranslate/TranscriptHistory`, on a serial utility queue. Same-UUID revisions
+fold into one sentence on read. Sessions retain their original capture ID even
+when an update arrives after a new recording starts. Production injects the store;
+tests and synthetic fixtures do not use the user's archive.
+
+The floating clock button and menu open `CaptionHistoryView`, which loads saved
+sessions on demand and preserves the native dark UI. Only the selected session's
+revision reloads its transcript, coalesced by 300 ms. One-click clear retires old
+pipeline work, clears live captions, and deletes this history archive in queue
+order; subsequent speech continues saving. Diagnostic logs remain separate.
+Bad session indexes are reported without hiding valid sessions; an incomplete
+last journal line is ignored. No historical diagnostics migration is performed.
+
+Hover timestamps are not observable display state. Live text layout is eager but
+bounded, with resize following only while the reader follows live output. Native
+recognizer EOF/errors retire capture instead of leaving a running indicator;
+graceful stop still drains the old generation's final result. This addresses
+confirmed lifecycle gaps, but the user's actual ASR stall has not been reproduced.
+Read `docs/long-session-history-1.6.1.md` for measurements and verification limits.
+
 ### Chinese dark settings (1.6.0 / build 20)
 
 SettingsView uses four native sidebar pages and an explicit dark palette, with

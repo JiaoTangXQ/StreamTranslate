@@ -67,7 +67,7 @@ struct MenuBarView: View {
                 MenuBarActionButton("退出仅手机模式（显示电脑字幕）", action: onTogglePhoneOnly)
             } else {
                 MenuBarActionButton("手机字幕…", action: onOpenPhone)
-                MenuBarActionButton("字幕记录", action: onOpenTranscript)
+                MenuBarActionButton("查看历史记录…", action: onOpenTranscript)
                 MenuBarActionButton("设置…", action: onOpenSettings)
             }
             MenuBarActionButton("退出 StreamTranslate", action: onQuit)
