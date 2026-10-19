@@ -2,6 +2,35 @@
 
 ## Product boundary
 
+### Caption reading workspace (1.9.0 / build 27)
+
+The caption overlay now has a shared native toolbar and a layout-owned outline
+pane. At 760pt of content width it uses distinct subtitle and outline columns;
+smaller windows use a native segmented picker. The caption instance/scroll state
+remains mounted through reflow. Outline disappearance no longer cancels work;
+explicit close/pause and window lifecycle own cancellation. Divider width is
+local presentation state (300–440pt), not a change to stored window preferences.
+Only height grows temporarily for outline: 360pt, restored on close; caption
+minimum is 184pt. Keep existing bottom-anchored restore and resize guards.
+
+`CaptionWorkspaceStyle` carries the dark neutral surfaces, SF control roles and
+blue accent. Preserve source/translation pairing and 100-row live cache; selectable
+caption text remains an eager bounded stack. Its control bar's measured height
+reserves reading space even while faded. Current outline topics expand by default,
+manual disclosures persist, advertisements fold separately, and each branch
+initially shows its first and two latest points. Copying retains the full graph.
+
+The default automatic delay is 30s (previously 2s), anchored to first change.
+Initial expansion, continue/retry and manual **整理一次** remain immediate.
+Related source records should form 1–3 coherent additions per batch, usually no
+more than 180 Chinese characters. Greetings, filler and repeated setup need no
+nodes. `displayedMap` now publishes only the last complete committed map; streamed
+patches stay internal until the entire generation succeeds. IDs/titles/old facts
+retain append-only behavior. Default idle release is 45s to avoid reloading the
+local fallback between 30s updates. Backend selection/translation/ASR are unchanged.
+See `docs/caption-workspace-1.9.0.md` for current validation; older release evidence
+below is historical where it describes overlays, two-second updates or live drafts.
+
 ### Cloud-first summary provider (1.8.0 / build 26)
 
 `AutomaticSummaryService` is the default provider for `ConversationSummaryModel`.

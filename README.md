@@ -18,16 +18,17 @@ StreamTranslate shows live English↔Chinese subtitles over other Mac apps. It c
 
 [View subtitle appearance settings](docs/screenshots/subtitle-appearance-1.6.0.png).
 
-## Latest update · 1.8.0
+## Latest update · 1.9.0
 
-- The collapsed **总结** tab opens independent topic trees. Advertisements, discussion and uncertain content have separate roots; advertisements start as compact folded rows. Click topics or branches to expand them, or copy the outline.
+- **对话脉络** opens a reading pane beside the subtitles in wide windows. Compact windows switch between **字幕 / 脉络**. Subtitles are never covered by the outline, and both have independent scrolling. Drag the divider to adjust column widths.
+- Independent topics retain stable identity. The current subject opens, earlier topics collapse, and advertisements remain in a separate folded group. Branches show at most three facts until expanded; copying includes the complete outline.
 - New content adds points to its topic; new roots stay separate even when their titles match, and returning subjects can extend earlier topics. Existing titles and tree order stay fixed. Source corrections replace only dependent points.
-- While expanded, the summary updates automatically from the current session's complete saved original text, including captions beyond the 100-row live cache. First expansion starts immediately; later changes coalesce for two seconds and draft text appears as it is generated.
+- While expanded, the summary updates automatically from the current session's complete saved original text, including captions beyond the 100-row live cache. First expansion starts immediately; later changes accumulate for about 30 seconds. The model targets 1–3 coherent additions from related records, and completed updates appear together rather than node by node. **整理一次** runs an update on demand.
 - **暂停**, **继续** and **重试** control automatic updates. With private API configuration, summaries use the cloud first and automatically fall back to the existing local Qwen3-4B-Instruct-2507 on failure. A successful cloud request never loads the local summary model. The header identifies the active mode. Without API configuration, summaries remain local.
 - Cloud summaries send new source-text batches and topic labels to the configured provider; audio, recognition, source review and translation retain their existing local paths. Credentials stay in ignored `.env` files outside the app bundle. See [summary API configuration and fallback](docs/cloud-summary-1.8.0.md).
-- The summary overlays the subtitle window without resizing its text width. AI topic classification and wording can be wrong; check the original captions. At 300 topics or 6,000 facts, additions pause before exceeding the limit and retain the previous completed map; the full transcript stays available.
+- AI topic classification and wording can be wrong; check the original captions. At 300 topics or 6,000 facts, additions pause before exceeding the limit and retain the previous completed map; the full transcript stays available.
 
-See [summary installation, behavior and verification limits](docs/conversation-summary-1.7.0.md).
+See [caption workspace behavior and verification](docs/caption-workspace-1.9.0.md), [cloud summary configuration](docs/cloud-summary-1.8.0.md) and [local summary installation](docs/conversation-summary-1.7.0.md).
 Saved text history was introduced in 1.6.1; older diagnostic sessions are not imported. See
 [long-session history and verification limits](docs/long-session-history-1.6.1.md),
 [settings redesign](docs/settings-redesign-1.6.0.md),

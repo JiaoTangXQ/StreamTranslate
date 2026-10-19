@@ -22,7 +22,7 @@ import SwiftUI
 @Test @MainActor func floatingPanelSupportsNativeEdgeResizing() {
     let panel = FloatingPanel(contentRect: NSRect(x: 0, y: 0, width: 400, height: 200))
     #expect(panel.styleMask.contains(.resizable))
-    #expect(panel.minSize == NSSize(width: 300, height: 144))
+    #expect(panel.minSize == NSSize(width: 300, height: 184))
 }
 
 @Test @MainActor func floatingPanelHasExplicitResizeTargetsOnEveryEdgeAndCorner() {

@@ -241,7 +241,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setupFloatingPanel() {
         let width = settings.panelWidth
-        let height = max(144, settings.panelHeight)
+        let height = max(FloatingPanel.minimumCaptionHeight, settings.panelHeight)
         let panel = FloatingPanel(
             contentRect: NSRect(x: 0, y: 0, width: width, height: height)
         )
@@ -251,7 +251,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.settings.panelWidth = size.width
             }
             let summaryExpanded = self.viewModel.conversationSummary.isExpanded
-            if (!summaryExpanded || size.height > 300.5 || self.settings.panelHeight >= 300),
+            if (!summaryExpanded || size.height > FloatingPanel.minimumSummaryHeight + 0.5 || self.settings.panelHeight >= FloatingPanel.minimumSummaryHeight),
                abs(self.settings.panelHeight - size.height) > 0.5 {
                 self.settings.panelHeight = size.height
             }
@@ -451,7 +451,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func updatePanelSize() {
         guard let panel = floatingPanel else { return }
         let width = settings.panelWidth
-        let height = max(viewModel.conversationSummary.isExpanded ? 300 : 144, settings.panelHeight)
+        let height = max(viewModel.conversationSummary.isExpanded ? FloatingPanel.minimumSummaryHeight : FloatingPanel.minimumCaptionHeight, settings.panelHeight)
         guard abs(panel.frame.width - width) > 0.5
                 || abs(panel.frame.height - height) > 0.5 else { return }
 
@@ -467,17 +467,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func updateSummaryPanelPresentation(_ expanded: Bool) {
         guard let panel = floatingPanel else { return }
-        panel.minSize.height = expanded ? 300 : 144
-        if expanded, panel.frame.height < 300 {
+        panel.minSize.height = expanded ? FloatingPanel.minimumSummaryHeight : FloatingPanel.minimumCaptionHeight
+        if expanded, panel.frame.height < FloatingPanel.minimumSummaryHeight {
             var frame = panel.frame
-            frame.size.height = 300
-            if let screen = panel.screen { frame.origin.y = min(frame.minY, screen.visibleFrame.maxY - 300) }
+            frame.size.height = FloatingPanel.minimumSummaryHeight
+            if let screen = panel.screen { frame.origin.y = min(frame.minY, screen.visibleFrame.maxY - FloatingPanel.minimumSummaryHeight) }
             panel.setFrame(frame, display: true)
         } else if !expanded {
             // Keep the reading window's bottom edge in place; centering the
             // restored height would make every open/close cycle move it up.
             var frame = panel.frame
-            frame.size.height = max(144, settings.panelHeight)
+            frame.size.height = max(FloatingPanel.minimumCaptionHeight, settings.panelHeight)
             if abs(frame.height - panel.frame.height) > 0.5 { panel.setFrame(frame, display: true) }
         }
     }

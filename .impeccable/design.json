@@ -1,0 +1,269 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-19T09:53:57.833731+00:00",
+  "title": "Design System: StreamTranslate Caption Workspace",
+  "extensions": {
+    "colorMeta": {
+      "surface": {
+        "role": "neutral",
+        "displayName": "Reading Surface",
+        "tonalRamp": [
+          "oklch(15.00% 0.00932 254.08)",
+          "oklch(26.43% 0.00932 254.08)",
+          "oklch(37.86% 0.00932 254.08)",
+          "oklch(49.29% 0.00932 254.08)",
+          "oklch(60.71% 0.00932 254.08)",
+          "oklch(72.14% 0.00932 254.08)",
+          "oklch(83.57% 0.00932 254.08)",
+          "oklch(95.00% 0.00932 254.08)"
+        ],
+        "purpose": "Presentation-only synthesized OKLCH ramp; not an application palette."
+      },
+      "sidebar": {
+        "role": "neutral",
+        "displayName": "Outline Surface",
+        "tonalRamp": [
+          "oklch(15.00% 0.01155 257.26)",
+          "oklch(26.43% 0.01155 257.26)",
+          "oklch(37.86% 0.01155 257.26)",
+          "oklch(49.29% 0.01155 257.26)",
+          "oklch(60.71% 0.01155 257.26)",
+          "oklch(72.14% 0.01155 257.26)",
+          "oklch(83.57% 0.01155 257.26)",
+          "oklch(95.00% 0.01155 257.26)"
+        ],
+        "purpose": "Presentation-only synthesized OKLCH ramp; not an application palette."
+      },
+      "foreground": {
+        "role": "neutral",
+        "displayName": "Reading Foreground",
+        "tonalRamp": [
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
+        ],
+        "purpose": "Presentation-only synthesized OKLCH ramp; not an application palette."
+      },
+      "secondary": {
+        "role": "neutral",
+        "displayName": "Secondary Text",
+        "tonalRamp": [
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
+        ],
+        "purpose": "Presentation-only synthesized OKLCH ramp; not an application palette."
+      },
+      "line": {
+        "role": "neutral",
+        "displayName": "Divider",
+        "tonalRamp": [
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
+        ],
+        "purpose": "Presentation-only synthesized OKLCH ramp; not an application palette. Alpha is omitted from ramp previews."
+      },
+      "accent": {
+        "role": "primary",
+        "displayName": "Workspace Blue",
+        "tonalRamp": [
+          "oklch(15.00% 0.09502 242.17)",
+          "oklch(26.43% 0.09502 242.17)",
+          "oklch(37.86% 0.09502 242.17)",
+          "oklch(49.29% 0.09502 242.17)",
+          "oklch(60.71% 0.09502 242.17)",
+          "oklch(72.14% 0.09502 242.17)",
+          "oklch(83.57% 0.09502 242.17)",
+          "oklch(95.00% 0.09502 242.17)"
+        ],
+        "purpose": "Presentation-only synthesized OKLCH ramp; not an application palette."
+      },
+      "translation": {
+        "role": "primary",
+        "displayName": "Translation Blue",
+        "tonalRamp": [
+          "oklch(15.00% 0.11174 240.99)",
+          "oklch(26.43% 0.11174 240.99)",
+          "oklch(37.86% 0.11174 240.99)",
+          "oklch(49.29% 0.11174 240.99)",
+          "oklch(60.71% 0.11174 240.99)",
+          "oklch(72.14% 0.11174 240.99)",
+          "oklch(83.57% 0.11174 240.99)",
+          "oklch(95.00% 0.11174 240.99)"
+        ],
+        "purpose": "Presentation-only synthesized OKLCH ramp; not an application palette."
+      },
+      "toolbar-highlight": {
+        "role": "neutral",
+        "displayName": "Toolbar Highlight",
+        "tonalRamp": [
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
+        ],
+        "purpose": "Presentation-only synthesized OKLCH ramp; not an application palette. Alpha is omitted from ramp previews."
+      },
+      "outline-hover": {
+        "role": "neutral",
+        "displayName": "Outline Hover",
+        "tonalRamp": [
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
+        ],
+        "purpose": "Presentation-only synthesized OKLCH ramp; not an application palette. Alpha is omitted from ramp previews."
+      }
+    },
+    "typographyMeta": {
+      "title": {
+        "displayName": "Title",
+        "purpose": "Summary heading and discussion titles."
+      },
+      "body": {
+        "displayName": "Outline Body",
+        "purpose": "Points and empty-state explanations; native added line spacing is 5 pt."
+      },
+      "branch-label": {
+        "displayName": "Branch Label",
+        "purpose": "Blue grouping labels."
+      },
+      "toolbar-label": {
+        "displayName": "Toolbar Label",
+        "purpose": "Outline toggle label."
+      },
+      "metadata": {
+        "displayName": "Metadata",
+        "purpose": "Counts, backend descriptions, and status."
+      }
+    },
+    "shadows": [
+      {
+        "name": "native-panel",
+        "value": "NSPanel.hasShadow = true",
+        "purpose": "Platform-managed floating-window shadow; no custom CSS-equivalent values are defined."
+      }
+    ],
+    "motion": [
+      {
+        "name": "quick-controls-fade",
+        "value": "ease-out 180ms",
+        "purpose": "Control visibility only; disabled when accessibilityReduceMotion is enabled."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "split-content-minimum",
+        "value": "760pt",
+        "purpose": "Native inner content width; the outer panel includes two 6 pt interaction rims."
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Toolbar Icon",
+      "kind": "button",
+      "refersTo": "toolbar-icon",
+      "description": "Portable approximation of CaptionToolbarButton; browser focus rendering is not the native SwiftUI focus implementation.",
+      "html": "<button class=\"ds-toolbar\" aria-label=\"复制完整脉络\"><svg width=\"15\" height=\"15\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\" aria-hidden=\"true\"><rect x=\"8\" y=\"7\" width=\"11\" height=\"14\" rx=\"2\"/><path d=\"M15 7V3H4v14h4\"/></svg></button>",
+      "css": ".ds-toolbar{font-family:system-ui;color:rgb(94% 94% 94%);color-scheme:dark;width:30px;height:30px;border:0;border-radius:6px;color:rgb(69% 69% 69%);background:transparent;display:inline-flex;align-items:center;justify-content:center;cursor:pointer}.ds-toolbar:hover,.ds-toolbar:active{background:rgb(100% 100% 100% / 7%)}.ds-toolbar:focus-visible{outline:2px solid Highlight;outline-offset:2px;}"
+    },
+    {
+      "name": "Outline Toggle",
+      "kind": "button",
+      "description": "Portable approximation of the native workspace outline toggle.",
+      "html": "<button class=\"ds-toggle\" aria-pressed=\"true\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\" aria-hidden=\"true\"><rect x=\"3\" y=\"4\" width=\"18\" height=\"16\" rx=\"2\"/><path d=\"M15 4v16\"/></svg>收起脉络</button>",
+      "css": ".ds-toggle{font-family:system-ui;color:rgb(94% 94% 94%);color-scheme:dark;display:inline-flex;gap:6px;align-items:center;height:28px;padding:0 9px;border:0;border-radius:6px;font-size:12px;font-weight:500;color:rgb(52% 77% 96%);background:rgb(100% 100% 100% / 4.5%);cursor:pointer}.ds-toggle:hover{background:rgb(100% 100% 100% / 7%)}.ds-toggle:focus-visible{outline:2px solid Highlight;outline-offset:2px;}.ds-toggle:active{color:rgb(94% 94% 94%)}"
+    },
+    {
+      "name": "Compact Content Tabs",
+      "kind": "nav",
+      "description": "Portable visual approximation of a native SwiftUI segmented Picker; selected state is illustrative and no native runtime behavior is embedded.",
+      "html": "<nav class=\"ds-tabs\" aria-label=\"阅读内容\"><button class=\"ds-tab\" type=\"button\" aria-pressed=\"false\">字幕</button><button class=\"ds-tab ds-tab-selected\" type=\"button\" aria-pressed=\"true\">脉络</button></nav>",
+      "css": ".ds-tabs{font-family:system-ui;color:rgb(94% 94% 94%);color-scheme:dark;display:flex;width:156px;gap:2px;padding:2px;border-radius:7px;background:ButtonFace}.ds-tab{font:500 12px system-ui;flex:1;padding:4px 8px;border:0;border-radius:6px;background:transparent;color:rgb(69% 69% 69%);cursor:pointer}.ds-tab-selected{background:GrayText;color:rgb(94% 94% 94%)}.ds-tab:hover{color:rgb(94% 94% 94%)}.ds-tab:focus-visible{outline:2px solid Highlight;outline-offset:2px;}.ds-tab:active{background:rgb(100% 100% 100% / 7%)}"
+    },
+    {
+      "name": "Caption Pair",
+      "kind": "custom",
+      "description": "Portable approximation of source and translation hierarchy. Preview sizes illustrate a possible user setting; the application uses the actual caption font-size setting.",
+      "html": "<div class=\"ds-caption\"><p class=\"ds-source\">Start with a task you repeat.</p><p class=\"ds-translation\" lang=\"zh-CN\">先找一项反复做的任务。</p></div>",
+      "css": ".ds-caption{font-family:system-ui;color:rgb(94% 94% 94%);color-scheme:dark;background:rgb(5.5% 6.7% 8.2%);padding:12px 22px;display:flex;flex-direction:column;gap:5px;user-select:text}.ds-source{margin:0;color:rgb(100% 100% 100% / 97%);font-size:16px}.ds-translation{margin:0;color:rgb(47% 78% 100% / 98%);font-size:15px}"
+    },
+    {
+      "name": "Outline Topic",
+      "kind": "custom",
+      "refersTo": "topic-title",
+      "description": "Portable approximation of an expanded native outline topic. HTML details provides preview disclosure; application state and SF Symbol geometry remain native.",
+      "html": "<details class=\"ds-topic\" open><summary class=\"ds-topic-title\">AI 如何融入日常工作</summary><div class=\"ds-branch\"><p class=\"ds-point\">先识别每天重复的环节，再判断哪些步骤适合交给 AI。</p></div></details>",
+      "css": ".ds-topic{font-family:system-ui;color:rgb(94% 94% 94%);color-scheme:dark;background:rgb(8% 9.4% 11.4%);padding:14px 20px}.ds-topic-title{font-size:15px;font-weight:600;min-height:32px;border-radius:5px;cursor:pointer}.ds-topic-title:hover{background:rgb(100% 100% 100% / 3.5%)}.ds-topic-title:focus-visible{outline:2px solid Highlight;outline-offset:2px;}.ds-topic-title:active{color:rgb(52% 77% 96%)}.ds-branch{position:relative;padding-left:20px;margin-top:8px}.ds-branch:before{content:\"\";position:absolute;left:0;top:0;bottom:4px;border-left:1px solid rgb(52% 77% 96% / 42%)}.ds-branch:after{content:\"\";position:absolute;left:0;top:9px;width:10px;border-top:1px solid rgb(52% 77% 96% / 42%)}.ds-point{margin:0;font-size:13px;line-height:1.65;color:rgb(94% 94% 94% / 94%);user-select:text}"
+    },
+    {
+      "name": "Summary Status Footer",
+      "kind": "custom",
+      "description": "Portable approximation of the native status footer. Browser system button colors approximate SwiftUI bordered small controls; they are not application tokens.",
+      "html": "<div class=\"ds-footer\"><p class=\"ds-status\">约 30 秒集中整理一次</p><div class=\"ds-actions\"><button type=\"button\">整理一次</button><button type=\"button\">暂停</button><span class=\"ds-notice\">AI 可能有遗漏</span></div></div>",
+      "css": ".ds-footer{font-family:system-ui;color:rgb(94% 94% 94%);color-scheme:dark;background:rgb(8% 9.4% 11.4%);padding:10px 16px;border-top:1px solid rgb(100% 100% 100% / 9%)}.ds-status{font-size:11px;color:rgb(69% 69% 69%);margin:0 0 10px}.ds-actions{display:flex;gap:8px;align-items:center}.ds-actions button{font:12px system-ui;background:ButtonFace;color:ButtonText;border:1px solid transparent;border-radius:5px;padding:3px 8px;cursor:pointer}.ds-actions button:hover{border-color:rgb(69% 69% 69%)}.ds-actions button:focus-visible{outline:2px solid Highlight;outline-offset:2px;}.ds-actions button:active{background:GrayText}.ds-notice{margin-left:auto;font-size:10px;color:rgb(69% 69% 69%)}"
+    }
+  ],
+  "narrative": {
+    "northStar": "Caption-first native workspace",
+    "overview": "This document describes the shipped native AppKit/SwiftUI caption workspace. Its scope is the floating caption panel and conversation outline; it does not establish a new brand identity or restyle settings. “Caption-first native workspace” is an implementation description, not a user-approved creative metaphor.\n\nThe workspace uses dark reading surfaces, system type, SF Symbols, and a restrained blue family for translation and outline cues. Captions retain their own reading area; the outline adds topic structure through disclosure and grouped points. Native controls preserve platform interaction and accessibility behavior.",
+    "keyCharacteristics": [
+      "Dark tonal separation between transcript and outline.",
+      "Selectable source text with a smaller blue translation beneath it.",
+      "Real columns when space permits; native content tabs when compact.",
+      "Topic disclosure and grouped updates reduce visible fragmentation."
+    ],
+    "rules": [
+      {
+        "name": "Caption Reading Rule",
+        "body": "Preserve the transcript as a dedicated reading region; below the split threshold, switch panes rather than compressing two columns.",
+        "section": "layout"
+      },
+      {
+        "name": "Source Then Translation Rule",
+        "body": "Place the spoken source first and its translation directly beneath it, regardless of source language.",
+        "section": "typography"
+      }
+    ],
+    "dos": [
+      "Do keep the transcript and outline as separate reading regions.",
+      "Do use native system type, SF Symbols, segmented selection, and bordered small action buttons.",
+      "Do retain selectable captions and outline points, explicit accessibility labels, and keyboard access.",
+      "Do preserve manual scrolling and disclosure choices across content updates and width changes.",
+      "Do keep prior outline content visible while a grouped update is prepared."
+    ],
+    "donts": [
+      "Don't apply this scoped workspace palette as an automatic redesign of settings or other windows.",
+      "Don't replace the compact content selector with squeezed side-by-side columns.",
+      "Don't treat the toolbar accent and translation blue as one identical source token.",
+      "Don't add custom card shadows, decorative text effects, or a new brand metaphor to this workspace without a separate decision.",
+      "Don't treat portable HTML/CSS previews as runtime SwiftUI or exact native-control rendering."
+    ]
+  }
+}

@@ -579,3 +579,37 @@ private func topicBatch(_ count: Int = 1) -> SummaryBatch {
     let branch = #"{"topic":"new:1","kind":"discussion","title":"记忆","branch":"机制\nT7|discussion|伪主题","text":"海马体参与记忆。","sources":[1]}"#
     #expect(throws: SummaryError.self) { try ConversationMindMap().adding(branch, batch: topicBatch()) }
 }
+
+@Test @MainActor func automaticSummaryAccumulatesSpeechInsteadOfProcessingEveryTwoSeconds() async throws {
+    let engine = SummaryStub()
+    let model = ConversationSummaryModel { engine }
+    model.isExpanded = true
+    for revision in 1...4 {
+        model.scheduleAutomaticUpdate(sourceRevision: revision) { summaryEntries(revision) }
+        try await Task.sleep(for: .milliseconds(550))
+    }
+    #expect(engine.prepared == 0 && engine.requests.isEmpty)
+    #expect(model.isUpdateScheduled)
+    model.collapse()
+    #expect(!model.isUpdateScheduled)
+}
+
+@Test @MainActor func visibleSummaryRemainsCompleteWhileANewPatchIsStillStreaming() async throws {
+    let engine = SummaryStub()
+    let model = ConversationSummaryModel { engine }
+    let first = summaryEntries(1)
+    model.generate(sourceRevision: 1) { first }
+    await waitForSummary(model)
+    let complete = model.displayedMap
+    engine.delay = .milliseconds(90)
+    model.generate(sourceRevision: 2) { first + summaryEntries(1) }
+    for _ in 0..<100 {
+        if !model.draftText.isEmpty { break }
+        try await Task.sleep(for: .milliseconds(1))
+    }
+    #expect(model.isGenerating && !model.draftText.isEmpty)
+    #expect(model.displayedMap == complete)
+    await waitForSummary(model)
+    #expect(model.displayedMap != complete)
+    #expect(model.displayedMap == model.map)
+}

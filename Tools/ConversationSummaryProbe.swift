@@ -129,9 +129,14 @@ import AppKit
         let added = map.topics.flatMap(\.branches).flatMap(\.points).count - old.topics.flatMap(\.branches).flatMap(\.points).count
         print("DENSE COMPLETE seconds=\(Date().timeIntervalSince(start)) added=\(added)")
         fflush(nil)
-        guard added >= 6, map.topics.count == 3, map.topics[0] == old.topics[0], map.topics[2] == old.topics[2] else {
+        let newSources = Set(denseBatch.records.map(\.sourceID))
+        let newPoints = map.topics.flatMap(\.branches).flatMap(\.points).filter { !$0.sources.isDisjoint(with: newSources) }
+        let combinesSources = newPoints.contains { $0.sources.intersection(newSources).count >= 2 }
+        let concise = newPoints.allSatisfy { $0.text.count <= 96 && $0.text.filter { $0 == "；" || $0 == ";" }.count <= 1 }
+            && newPoints.reduce(0) { $0 + $1.text.count } <= 180
+        guard (1...3).contains(added), combinesSources, concise, map.topics.count == 3, map.topics[0] == old.topics[0], map.topics[2] == old.topics[2] else {
             throw SummaryError.invalidResult
         }
-        print("PASS dense_fact_batch")
+        print("PASS dense_fact_batch_consolidated_into_1_to_3_updates_with_combined_sources")
     }
 }

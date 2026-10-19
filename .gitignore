@@ -40,3 +40,7 @@ invitation.txt
 # Tool caches
 __pycache__/
 *.pyc
+
+# Local native UI review captures (synthetic fixtures)
+.impeccable/review/
+.impeccable/mocks/

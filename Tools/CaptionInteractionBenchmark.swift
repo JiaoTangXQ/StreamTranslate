@@ -86,7 +86,14 @@ enum CaptionInteractionBenchmark {
                 // production-service probe verifies actual inference.
                 let summary = ConversationSummaryModel { SummaryPreviewProvider() }
                 let previewVM = CaptionViewModel(conversationSummary: summary)
-                previewVM.captionHistory = vm.captionHistory
+                previewVM.captionHistory = [
+                    CaptionEntry(timestamp: .distantPast, englishText: "We want to give you a little background on who we are and what we do.", chineseText: "我们先介绍一下团队是谁，以及平时在做什么。"),
+                    CaptionEntry(timestamp: .distantPast, englishText: "The goal is to show how AI can help with the repetitive work we do every day.", chineseText: "这次想通过具体例子，说明 AI 如何帮助处理每天重复的工作。"),
+                    CaptionEntry(timestamp: .distantPast, englishText: "Start with a task you repeat. Then decide which steps would benefit from AI.", chineseText: "先找一项反复做的任务，再判断哪些步骤适合交给 AI。"),
+                    CaptionEntry(timestamp: .distantPast, englishText: "The point is to free up your time, so you can focus on work that needs your judgment.", chineseText: "目的是把时间还给你，让你专注于真正需要自己判断的事情。")
+                ]
+                previewVM.isModelReady = true
+                previewVM.isTranslationReady = true
                 let summaryHost = FloatingPanelHostingView(rootView: FloatingCaptionView(onMinimize: {})
                     .environment(previewVM).environment(CaptionSettings(defaults: defaults)))
                 panel.contentView = summaryHost
@@ -96,13 +103,41 @@ enum CaptionInteractionBenchmark {
                     if !summary.isGenerating { break }
                     try await Task.sleep(for: .milliseconds(10))
                 }
-                for (width, height) in [(620.0, 300.0), (300.0, 300.0), (620.0, 640.0), (300.0, 640.0)] {
+                for (width, height) in [(980.0, 420.0), (780.0, 360.0), (620.0, 360.0), (300.0, 360.0), (980.0, 640.0)] {
                     panel.setContentSize(NSSize(width: width, height: height))
                     try await Task.sleep(for: .milliseconds(100))
-                    let suffix = height > 300 ? "-tall" : ""
+                    let suffix = "-\(Int(height))"
                     try screenshot(summaryHost, to: output.appendingPathComponent("summary-\(Int(width))\(suffix).png"))
+                    if width >= 780 {
+                        let fields = descendants(of: summaryHost).compactMap { $0 as? NSTextField }
+                        let outlineTexts = Set(summary.map.topics.flatMap(\.branches).flatMap(\.points).map(\.text))
+                        guard let point = fields.first(where: { outlineTexts.contains($0.stringValue) }) else {
+                            print("FAIL: no selectable outline text in split preview")
+                            throw CocoaError(.validationMissingMandatoryProperty)
+                        }
+                        do {
+                            let summaryX = point.convert(point.bounds, to: summaryHost).minX
+                            for text in previewVM.captionHistory {
+                                for field in fields where field.stringValue == text.englishText || field.stringValue == text.chineseText {
+                                    guard field.convert(field.bounds, to: summaryHost).maxX < summaryX else {
+                                        throw CocoaError(.validationMissingMandatoryProperty)
+                                    }
+                                }
+                            }
+                            print("SPLIT NONOVERLAP width=\(width)")
+                        }
+                    }
+                    if width == 300,
+                       let segmented = descendants(of: summaryHost).compactMap({ $0 as? NSSegmentedControl }).first {
+                        segmented.selectedSegment = 0
+                        _ = segmented.sendAction(segmented.action, to: segmented.target)
+                        try await Task.sleep(for: .milliseconds(100))
+                        try screenshot(summaryHost, to: output.appendingPathComponent("compact-captions-300.png"))
+                        segmented.selectedSegment = 1
+                        _ = segmented.sendAction(segmented.action, to: segmented.target)
+                    }
                 }
-                panel.setContentSize(NSSize(width: 300, height: 300))
+                panel.setContentSize(NSSize(width: 300, height: 360))
                 // The panel stays dark even when the surrounding system is Light.
                 panel.appearance = NSAppearance(named: .aqua)
                 for state in ["empty", "loading", "streaming", "paused", "error"] {
@@ -120,7 +155,7 @@ enum CaptionInteractionBenchmark {
                     var ready = false
                     for _ in 0..<200 {
                         switch state {
-                        case "loading": ready = stateModel.progress.hasPrefix("正在加载脑图模型")
+                        case "loading": ready = stateModel.progress.hasPrefix("正在准备脑图服务")
                         case "streaming": ready = !stateModel.draftText.isEmpty
                         case "paused": ready = !stateModel.isGenerating && !stateModel.text.isEmpty
                         case "error": ready = stateModel.errorMessage != nil
@@ -131,6 +166,14 @@ enum CaptionInteractionBenchmark {
                     }
                     guard ready else { throw CocoaError(.validationMissingMandatoryProperty) }
                     if state == "paused" { stateModel.pauseAutomaticUpdates() }
+                    if state == "streaming" {
+                        for width in [980.0, 620.0, 300.0, 980.0, 300.0] {
+                            panel.setContentSize(NSSize(width: width, height: 360))
+                            try await Task.sleep(for: .milliseconds(40))
+                            guard stateModel.isExpanded && stateModel.isGenerating else { throw CocoaError(.validationMissingMandatoryProperty) }
+                        }
+                        print("REFLOW preserves in-flight summary across wide/compact layouts")
+                    }
                     try await Task.sleep(for: .milliseconds(100))
                     try screenshot(stateHost, to: output.appendingPathComponent("summary-300-\(state)-light.png"))
                     stateModel.collapse()
@@ -197,17 +240,18 @@ enum CaptionInteractionBenchmark {
 }
 
 @MainActor private final class SummaryPreviewProvider: ConversationSummaryProviding {
-    let state: String
+    var state: String
+    var backendDescription: String { "AI 脑图 · 云端总结" }
     init(state: String = "normal") { self.state = state }
     func prepare() async throws {
         if state == "loading" { try await Task.sleep(for: .seconds(60)) }
         if state == "error" { throw SummaryError.modelUnavailable }
     }
     func summarize(_ text: String, previous: String, onUpdate: @escaping @MainActor (String) -> Void) async throws -> String {
-        let outline = #"{"topic":"new:1","kind":"advertisement","title":"耳机品牌赞助","branch":"优惠","text":"片头介绍赞助商与听众优惠。","sources":[1]}"# + "\n"
-            + #"{"topic":"new:2","kind":"discussion","title":"记忆如何形成","branch":"记忆机制","text":"海马体参与形成新的记忆。","sources":[1]}"# + "\n"
-            + #"{"topic":"new:2","kind":"discussion","title":"记忆如何形成","branch":"记忆机制","text":"睡眠帮助记忆巩固。","sources":[1]}"# + "\n"
-            + #"{"topic":"new:3","kind":"discussion","title":"城市住房政策","branch":"争议","text":"发言者对租金政策持不同观点。","sources":[1]}"#
+        let outline = #"{"topic":"new:1","kind":"advertisement","title":"片头赞助与优惠信息","branch":"优惠","text":"片头介绍赞助商及听众优惠。","sources":[1]}"# + "\n"
+            + #"{"topic":"new:2","kind":"discussion","title":"直播的目标","branch":"要点","text":"这场对话先介绍团队与直播目标：通过具体例子，说明 AI 如何减少重复工作，让人把时间留给更有价值的任务。","sources":[1]}"# + "\n"
+            + #"{"topic":"new:3","kind":"discussion","title":"AI 如何融入日常工作","branch":"要点","text":"讨论转向实际使用方式。先识别每天重复的环节，再判断哪些步骤适合交给 AI，避免为了使用工具而增加工作。","sources":[1]}"#
+
         if state == "streaming" {
             onUpdate(outline)
             try await Task.sleep(for: .seconds(60))

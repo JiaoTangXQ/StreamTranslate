@@ -21,6 +21,8 @@ final class FloatingPanel: NSPanel, NSWindowDelegate {
     /// A nonactivating panel can lose its native outer resize border after a
     /// Dock restore, while points inside the content region remain reliable.
     static let resizeInteractionInset: CGFloat = 6
+    static let minimumCaptionHeight: CGFloat = 184
+    static let minimumSummaryHeight: CGFloat = 360
 
     var onResize: ((NSSize) -> Void)?
     var onRestore: (() -> Void)?
@@ -54,7 +56,7 @@ final class FloatingPanel: NSPanel, NSWindowDelegate {
         hidesOnDeactivate = false
         isReleasedWhenClosed = false
         acceptsMouseMovedEvents = true
-        minSize = NSSize(width: 300, height: 144)
+        minSize = NSSize(width: 300, height: Self.minimumCaptionHeight)
         delegate = self
     }
 

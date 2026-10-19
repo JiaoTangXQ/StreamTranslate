@@ -45,7 +45,8 @@ enum SummaryTranscript {
     private(set) var map = ConversationMindMap()
     private(set) var draftMap: ConversationMindMap?
     var text: String { map.outline }
-    var displayedMap: ConversationMindMap { draftMap ?? map }
+    // Publish a coherent completed update; streaming patches remain internal.
+    var displayedMap: ConversationMindMap { map }
     private(set) var draftText = ""
     private(set) var isGenerating = false
     private(set) var isUpdateScheduled = false
@@ -71,7 +72,7 @@ enum SummaryTranscript {
     }
     @ObservationIgnored private var pending: Request?
 
-    init(updateDelay: Duration = .seconds(2), idleTimeout: Duration = .seconds(15),
+    init(updateDelay: Duration = .seconds(30), idleTimeout: Duration = .seconds(45),
          makeService: @escaping () -> any ConversationSummaryProviding = { AutomaticSummaryService() }) {
         self.updateDelay = updateDelay; self.idleTimeout = idleTimeout
         self.makeService = makeService
