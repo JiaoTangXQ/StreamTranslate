@@ -198,6 +198,8 @@ final class CaptionViewModel {
         captionHistory.suffix(Self.maximumFloatingHistory - (hasStreamingText ? 1 : 0))
     }
     let historyStore: CaptionHistoryStore?
+    let conversationSummary: ConversationSummaryModel
+    private(set) var conversationSourceRevision = 0
     @ObservationIgnored private var captionArchiveSessions: [UUID: (UUID, Date)] = [:]
     @ObservationIgnored private var captionWorkCounts: [UUID: Int] = [:]
     @ObservationIgnored private var retainedCaptionUpdates: [UUID: CaptionEntry] = [:]
@@ -274,8 +276,9 @@ final class CaptionViewModel {
 
     // MARK: - Lifecycle
 
-    init(historyStore: CaptionHistoryStore? = nil) {
+    init(historyStore: CaptionHistoryStore? = nil, conversationSummary: ConversationSummaryModel? = nil) {
         self.historyStore = historyStore
+        self.conversationSummary = conversationSummary ?? ConversationSummaryModel()
     }
 
     func preloadModel(modelId: String = ASRModel.defaultModel.id) {
@@ -415,8 +418,24 @@ final class CaptionViewModel {
     }
 
     func beginCompanionSession() {
+        conversationSummary.reset()
+        conversationSourceRevision = 0
         companionSessionID = UUID()
         companionSessionStartedAt = .now
+    }
+
+    func requestConversationSummary() {
+        let sessionID = companionSessionID
+        let startedAt = companionSessionStartedAt
+        let store = historyStore
+        let fallback = captionHistory.filter { $0.timestamp >= startedAt }
+        conversationSummary.generate(sourceRevision: conversationSourceRevision) {
+            if let store {
+                guard store.errorMessage == nil else { throw SummaryError.historyUnavailable }
+                return try await store.captions(in: sessionID)
+            }
+            return fallback
+        }
     }
 
     func clearHistory() {
@@ -1903,6 +1922,7 @@ final class CaptionViewModel {
     }
 
     private func appendCaption(_ entry: CaptionEntry) {
+        if entry.timestamp >= companionSessionStartedAt { conversationSourceRevision &+= 1 }
         captionHistory.append(entry)
         if historyStore != nil {
             captionArchiveSessions[entry.id] = (companionSessionID, companionSessionStartedAt)
@@ -1938,6 +1958,9 @@ final class CaptionViewModel {
             chineseText: chinese,
             sourceLanguage: sourceLanguage
         )
+        if updated.originalText != previous.originalText, updated.timestamp >= companionSessionStartedAt {
+            conversationSourceRevision &+= 1
+        }
         if let historyIndex = captionHistory.firstIndex(where: { $0.id == id }) {
             captionHistory[historyIndex] = updated
         }

@@ -24,6 +24,7 @@ final class FloatingPanel: NSPanel, NSWindowDelegate {
 
     var onResize: ((NSSize) -> Void)?
     var onRestore: (() -> Void)?
+    var onMinimize: (() -> Void)?
 
     private struct ResizeSession {
         let edges: FloatingPanelResizeEdges
@@ -263,6 +264,8 @@ final class FloatingPanel: NSPanel, NSWindowDelegate {
     func windowDidResize(_ notification: Notification) {
         onResize?(frame.size)
     }
+
+    func windowDidMiniaturize(_ notification: Notification) { onMinimize?() }
 
     func windowDidDeminiaturize(_ notification: Notification) {
         restoreFrameAfterMinimization()

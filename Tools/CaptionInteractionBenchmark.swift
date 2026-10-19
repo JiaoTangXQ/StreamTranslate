@@ -81,6 +81,44 @@ enum CaptionInteractionBenchmark {
                     }
                     try screenshot(host, to: output.appendingPathComponent("floating-\(Int(width)).png"))
                 }
+                vm.conversationSummary.isExpanded = true
+                // No model is started by this visual fixture. A separate
+                // production-service probe verifies actual inference.
+                let summary = ConversationSummaryModel { SummaryPreviewProvider() }
+                let previewVM = CaptionViewModel(conversationSummary: summary)
+                previewVM.captionHistory = vm.captionHistory
+                let summaryHost = FloatingPanelHostingView(rootView: FloatingCaptionView(onMinimize: {})
+                    .environment(previewVM).environment(CaptionSettings(defaults: defaults)))
+                panel.contentView = summaryHost
+                summary.isExpanded = true
+                summary.generate(sourceRevision: 0) { Array(vm.captionHistory.suffix(4)) }
+                for _ in 0..<100 {
+                    if !summary.isGenerating { break }
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+                for width in [620.0, 300.0] {
+                    panel.setContentSize(NSSize(width: width, height: 300))
+                    try await Task.sleep(for: .milliseconds(100))
+                    try screenshot(summaryHost, to: output.appendingPathComponent("summary-\(Int(width)).png"))
+                }
+                // The panel stays dark even when the surrounding system is Light.
+                panel.appearance = NSAppearance(named: .aqua)
+                for state in ["empty", "loading", "error"] {
+                    let stateModel = ConversationSummaryModel { SummaryPreviewProvider(state: state) }
+                    let stateVM = CaptionViewModel(conversationSummary: stateModel)
+                    stateVM.captionHistory = vm.captionHistory
+                    if state != "empty" { stateVM.addCaption(english: "Synthetic current conversation.", chinese: "") }
+                    let stateHost = FloatingPanelHostingView(rootView: FloatingCaptionView(onMinimize: {})
+                        .environment(stateVM).environment(CaptionSettings(defaults: defaults)))
+                    panel.contentView = stateHost
+                    stateModel.isExpanded = true
+                    if state != "empty" {
+                        stateModel.generate(sourceRevision: 0) { Array(vm.captionHistory.suffix(4)) }
+                    }
+                    try await Task.sleep(for: .milliseconds(200))
+                    try screenshot(stateHost, to: output.appendingPathComponent("summary-300-\(state)-light.png"))
+                    stateModel.collapse()
+                }
                 let archiveURL = FileManager.default.temporaryDirectory
                     .appendingPathComponent("StreamTranslate.history-preview.\(UUID())")
                 defer { try? FileManager.default.removeItem(at: archiveURL) }
@@ -140,4 +178,17 @@ enum CaptionInteractionBenchmark {
     @MainActor private static func descendants(of view: NSView) -> [NSView] {
         view.subviews + view.subviews.flatMap { descendants(of: $0) }
     }
+}
+
+@MainActor private final class SummaryPreviewProvider: ConversationSummaryProviding {
+    let state: String
+    init(state: String = "normal") { self.state = state }
+    func prepare() async throws {
+        if state == "loading" { try await Task.sleep(for: .seconds(60)) }
+        if state == "error" { throw SummaryError.modelUnavailable }
+    }
+    func summarize(_ text: String, previous: String) async throws -> String {
+        "在聊什么\n讨论长时间使用后字幕卡顿，以及如何更容易跟上对话。\n\n讨论进展\n悬浮窗只保留100条字幕，完整记录保存在本机。右侧增加可折叠的中文总结，按需生成。\n\n待确认\n静默停字幕的原因尚未复现，是否自动更新总结也未确定。"
+    }
+    func cancel() {}
 }

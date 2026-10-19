@@ -250,13 +250,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if abs(self.settings.panelWidth - size.width) > 0.5 {
                 self.settings.panelWidth = size.width
             }
-            if abs(self.settings.panelHeight - size.height) > 0.5 {
+            let summaryExpanded = self.viewModel.conversationSummary.isExpanded
+            if (!summaryExpanded || size.height > 300.5 || self.settings.panelHeight >= 300),
+               abs(self.settings.panelHeight - size.height) > 0.5 {
                 self.settings.panelHeight = size.height
             }
         }
         panel.onRestore = { [weak self] in
             self?.floatingPanelDidRestore()
         }
+        panel.onMinimize = { [weak self] in self?.viewModel.conversationSummary.collapse() }
 
         if let screen = NSScreen.main {
             let screenFrame = screen.visibleFrame
@@ -274,7 +277,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             onMinimize: { [weak self] in self?.minimizeFloatingPanel() },
             onSettings: { [weak self] in self?.openSettingsWindow() },
             onPhone: { [weak self] in self?.openCompanionWindow() },
-            onHistory: { [weak self] in self?.openTranscriptWindow() })
+            onHistory: { [weak self] in self?.openTranscriptWindow() },
+            onSummaryExpansion: { [weak self] expanded in self?.updateSummaryPanelPresentation(expanded) })
             .environment(viewModel)
             .environment(settings)
         floatingPanel?.contentView = FloatingPanelHostingView(rootView: content)
@@ -334,6 +338,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func minimizeFloatingPanel() {
         guard let panel = floatingPanel, !panel.isMiniaturized else { return }
+        viewModel.conversationSummary.collapse()
+        updateSummaryPanelPresentation(false)
         panel.prepareForMinimization()
         let policyChanged = NSApp.setActivationPolicy(.regular)
         AppLogger.log("Minimizing floating panel. Dock policy changed=\(policyChanged)")
@@ -445,7 +451,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func updatePanelSize() {
         guard let panel = floatingPanel else { return }
         let width = settings.panelWidth
-        let height = max(144, settings.panelHeight)
+        let height = max(viewModel.conversationSummary.isExpanded ? 300 : 144, settings.panelHeight)
         guard abs(panel.frame.width - width) > 0.5
                 || abs(panel.frame.height - height) > 0.5 else { return }
 
@@ -457,6 +463,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             display: true,
             animate: true
         )
+    }
+
+    private func updateSummaryPanelPresentation(_ expanded: Bool) {
+        guard let panel = floatingPanel else { return }
+        panel.minSize.height = expanded ? 300 : 144
+        if expanded, panel.frame.height < 300 {
+            var frame = panel.frame
+            frame.size.height = 300
+            if let screen = panel.screen { frame.origin.y = min(frame.minY, screen.visibleFrame.maxY - 300) }
+            panel.setFrame(frame, display: true)
+        } else if !expanded {
+            // Keep the reading window's bottom edge in place; centering the
+            // restored height would make every open/close cycle move it up.
+            var frame = panel.frame
+            frame.size.height = max(144, settings.panelHeight)
+            if abs(frame.height - panel.frame.height) > 0.5 { panel.setFrame(frame, display: true) }
+        }
     }
 
     private func setupHotkey() {
@@ -579,6 +602,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func applyVisibilityPolicy() {
         let policy = CaptionVisibilityPolicy(phoneOnly: settings.phoneOnlyDisplay)
         if !policy.permitsCaptionWindows {
+            viewModel.conversationSummary.collapse()
             popover.performClose(nil)
             companionServer.cancelInvitation()
             webCompanionServer.cancelInvitation()
@@ -593,6 +617,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        viewModel.conversationSummary.cancel()
         historyStore.finishPendingWrites()
         if let suite = windowFixturePreferenceSuite { UserDefaults.standard.removePersistentDomain(forName: suite) }
         translationPreparationTask?.cancel()

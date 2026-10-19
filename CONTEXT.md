@@ -2,6 +2,44 @@
 
 ## Product boundary
 
+### On-demand local conversation summary (1.7.0 / build 22)
+
+`ConversationSummaryView` adds a default-collapsed right-edge tab over the existing
+native dark caption panel. First expansion generates a Chinese topic-and-main-points
+summary; new source content requires manual update. The drawer overlays
+captions without changing their layout width. Expanding a panel shorter than 300pt
+temporarily raises its minimum height from 144pt to 300pt; folding restores the
+stored height preference. Preserve this overlay behavior and the incumbent UI.
+
+Production summary input reads the full current capture session from
+`CaptionHistoryStore`, never just the 100-row live cache. Only completed original
+source text is summarized. `SummaryTranscript` splits all input into bounded
+1,200-character chunks, passing the previous summary to each subsequent request.
+An unchanged source prefix permits incremental processing of appended captions;
+an earlier original-source correction restarts from the complete session. Summaries
+are approximate AI output, held in memory only, and are reset on capture-session
+change or clear. They are not summaries of older saved sessions.
+
+`LocalSummaryService` uses a separate Qwen3-4B-Instruct-2507 Q4_K_M model and private Unix socket,
+one request at a time, two utility CPU threads, no GPU. It loads on demand and frees
+the worker after success, failure or cancellation. Fold, minimize, phone-only mode,
+clear, capture-session change, quit and memory pressure cancel pending work;
+generation guards reject late results. Model installation downloads weights, not
+conversation data. `scripts/install-summary-local.sh` pins the LM Studio quantization
+revision and full SHA-256 and copies an available llama.cpp runtime. App execution
+has no Python dependency. Model weights stay out of git.
+
+The local `SystemLanguageModel` probe reported `deviceNotEligible`; this feature
+does not use Apple Foundation Models. Real inference was checked on synthetic fixed text, including appended content that
+replaces an earlier undecided summary with an explicit manual-update decision.
+Final observed preparation/first-generation/update times were 13.4/16.9/16.1s;
+a separate two-request sample peaked at about 3.7 GiB child RSS. These are samples,
+not latency or memory guarantees. Sequential regression passed 333 tests with the
+same eight shared-log/installed-asset exclusions. Final 300pt state previews and
+Release build passed; native mouse/keyboard/VoiceOver and real ASR concurrency
+remain unverified. Read
+`docs/conversation-summary-1.7.0.md` for setup, checks and limitations.
+
 ### Bounded live captions and saved history (1.6.1 / build 21)
 
 The live `CaptionViewModel.captionHistory` retains at most 100 completed entries;
@@ -176,7 +214,7 @@ notes before claiming install/real-device readiness.
 
 StreamTranslate is a local macOS SwiftUI app for English↔Chinese live captions. Microphone mode captures nearby speech; System Audio mode captures audio playing on the Mac. The target deployment machine is Apple M4 with 16 GB unified memory and macOS 26.2.
 
-The project is local-first. `project.yml` is the XcodeGen source of truth. The 1.1 enhancement target is the same 16GB M4 on macOS 26.4. Development versions are committed to the local Git repository; no remote push is part of the current work.
+The project is local-first. `project.yml` is the XcodeGen source of truth. The 1.1 enhancement target is the same 16GB M4 on macOS 26.4. The user authorized GitHub publication under JiaoTangXQ; preserve the repository-local author/committer identity and scope credentials to that account when pushing.
 
 ## Runtime pipelines
 

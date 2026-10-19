@@ -36,6 +36,7 @@ struct FloatingCaptionView: View {
     var onSettings: () -> Void = {}
     var onPhone: () -> Void = {}
     var onHistory: () -> Void = {}
+    var onSummaryExpansion: (Bool) -> Void = { _ in }
 
     private var controlsVisible: Bool {
         controls.isVisible || !viewModel.isRecording || viewModel.isChangingCaptureConfiguration
@@ -97,6 +98,7 @@ struct FloatingCaptionView: View {
                             .id(Self.bottomID)
                     }
                     .padding(.horizontal, 20)
+                    .padding(.trailing, 22)
                     .padding(.top, 12)
                     .padding(.bottom, 12)
                     .textSelection(.enabled)
@@ -154,6 +156,10 @@ struct FloatingCaptionView: View {
                 .opacity(controlsVisible ? 1 : 0)
                 .allowsHitTesting(controlsVisible)
                 .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: controlsVisible)
+        }
+        .overlay { ConversationSummaryView() }
+        .onChange(of: viewModel.conversationSummary.isExpanded) { _, expanded in
+            onSummaryExpansion(expanded)
         }
         .onContinuousHover { phase in if case .active = phase { controls.reveal() } }
         .simultaneousGesture(TapGesture().onEnded { controls.reveal() })

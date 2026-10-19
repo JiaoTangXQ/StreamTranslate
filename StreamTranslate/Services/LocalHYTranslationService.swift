@@ -154,7 +154,7 @@ import Darwin
 
 /// Small bounded command adapter for macOS' bundled curl. Audio/text is passed
 /// through private pipes, never through shell interpolation or command arguments.
-private final class LocalCommand: @unchecked Sendable {
+final class LocalCommand: @unchecked Sendable {
     private let lock = NSLock()
     private var process: Process?
     private var cancelled = false

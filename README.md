@@ -18,14 +18,15 @@ StreamTranslate shows live English↔Chinese subtitles over other Mac apps. It c
 
 [View subtitle appearance settings](docs/screenshots/subtitle-appearance-1.6.0.png).
 
-## Latest update · 1.6.1
+## Latest update · 1.7.0
 
-- The live caption cache retains at most 100 completed captions; the floating window shows up to 99 plus the current streaming caption.
-- Complete caption text is saved under `~/Library/Application Support/StreamTranslate/TranscriptHistory/` across relaunches, including late updates after a caption leaves the live window. The archive contains no audio.
-- Open saved sessions from the floating clock button or **查看历史记录…** in the menu. **清空全部记录** deletes the archive and clears current captions; diagnostic logs remain separate.
-- Native recognition errors and ended result streams stop capture and update the running state; normal stop still waits for final words and translations.
+- A collapsed **总结** tab on the floating window's right edge opens a local Chinese AI summary of the current conversation's topic, progress and unresolved questions.
+- Summary input comes from the current session's complete saved original text, including captions beyond the 100-row live cache. Generate on first expansion and update manually when new content arrives.
+- A separate optional Qwen3-4B-Instruct-2507 model runs one request at a time on two CPU threads, with no GPU use. Folding the summary cancels generation and releases its model; conversation text stays on the Mac.
+- The summary overlays the subtitle window without resizing its text width. AI output may omit or misstate details; check the original captions.
 
-History starts with this version; older diagnostic sessions are not imported. See
+See [summary installation, behavior and verification limits](docs/conversation-summary-1.7.0.md).
+Saved text history was introduced in 1.6.1; older diagnostic sessions are not imported. See
 [long-session history and verification limits](docs/long-session-history-1.6.1.md),
 [settings redesign](docs/settings-redesign-1.6.0.md),
 [remote phone setup](docs/remote-companion-1.5.0.md) and
@@ -49,6 +50,7 @@ Fixed English and Mandarin have Apple's continuous on-device speech transcriber.
 - Microphone and ScreenCaptureKit watchdogs rebuild stalled capture after about three seconds
 - Audio, speech recognition, and translation stay on the Mac
 - Optional Qwen source review and bidirectional Hy-MT final refinement update the same caption; guarded revisions, timeouts and memory-pressure fallback retain the fast system path
+- Optional local conversation summaries use the full current-session original transcript; summaries are generated on demand and are not saved across app relaunches
 
 The transcription/translation pipeline uses network access to install missing language assets or optional models/runtimes. Enabling phone subtitles also requires a LAN connection or, for the optional remote relay, Internet access. Audio recognition and translation processing remain local.
 
