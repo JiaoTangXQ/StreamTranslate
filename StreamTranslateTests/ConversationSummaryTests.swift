@@ -288,3 +288,91 @@ private func summaryEntries(_ count: Int) -> [CaptionEntry] {
         _ = try decoder.append(Data("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n".utf8))
     }
 }
+
+@Test @MainActor func summaryStartupReportsActualWorkerExitInsteadOfGenericUnavailable() async throws {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("SummaryWorkerExit.\(UUID())")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let executable = folder.appendingPathComponent("llama-server")
+    try "#!/bin/sh\nexit 42\n".write(to: executable, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+    let model = folder.appendingPathComponent("model.gguf")
+    try Data([1]).write(to: model)
+    let service = LocalSummaryService(assets: .init(executable: executable, model: model), startupTimeout: .seconds(2))
+    defer { service.cancel() }
+    do {
+        try await service.prepare()
+        Issue.record("An exited worker must not report ready")
+    } catch {
+        #expect(error.localizedDescription.contains("42"))
+    }
+}
+
+@Test func mindMapPreservesTopicBranchesAndTheirOwnPoints() {
+    let source = "主题：幸福与伴侣关系\n- 婚姻选择\n  - 有人看重住房条件。\n  - 发言者表达惊讶。\n- 幸福理解\n  - 双方正在讨论何为美好生活。"
+    let map = ConversationMindMap.parse(source)
+    #expect(map?.topic == "幸福与伴侣关系")
+    #expect(map?.branches.map(\.title) == ["婚姻选择", "幸福理解"])
+    #expect(map?.branches[0].points == ["有人看重住房条件。", "发言者表达惊讶。"])
+    #expect(map?.branches[1].points == ["双方正在讨论何为美好生活。"])
+}
+
+@Test func streamedMindMapWaitsForTopicAndAddsIncompleteNodesWithoutChangingParents() {
+    #expect(ConversationMindMap.parse("主", isDraft: true) == nil)
+    #expect(ConversationMindMap.parse("主题：", isDraft: true) == nil)
+    let early = ConversationMindMap.parse("主题：幸福\n- 关系\n  -", isDraft: true)
+    #expect(early?.topic == "幸福")
+    #expect(early?.branches.count == 1)
+    #expect(early?.branches[0].points.isEmpty == true)
+    let next = ConversationMindMap.parse("主题：幸福\n- 关系\n  - 住房条件\n- 不同看法\n  - 仍在讨论", isDraft: true)
+    #expect(next?.branches[0].points == ["住房条件"])
+    #expect(next?.branches[1].points == ["仍在讨论"])
+}
+
+@Test func mindMapLimitsVisibleNodesWithoutDroppingOverflowFacts() {
+    let source = "主题：测试\n" + (0..<9).map { branch in
+        "- 话题\(branch)\n" + (0..<5).map { "  - P\(branch).\($0)\n" }.joined()
+    }.joined()
+    let map = ConversationMindMap.parse(source)!
+    #expect(map.branches.count <= 5)
+    #expect(map.branches.allSatisfy { $0.points.count <= 3 })
+    let displayed = map.branches.flatMap { [$0.title] + $0.points }.joined(separator: "\n")
+    for branch in 0..<9 {
+        for point in 0..<5 { #expect(displayed.contains("P\(branch).\(point)")) }
+    }
+}
+
+@Test func nonOutlineSummaryKeepsAllOriginalTextAsReadableFallback() {
+    let source = "在聊什么\n软件使用体验。\n\n主要内容\n一个尚未解决的问题。"
+    let map = ConversationMindMap.parse(source)
+    #expect(map?.branches.first?.points == [source])
+}
+
+@Test func mindMapKeepsOrphanProseAndRecognizesMarkdownStarBullets() {
+    let prose = ConversationMindMap.parse("主题：发布计划\n先完成测试，再决定上线。")
+    #expect(prose?.branches.first?.points == ["先完成测试，再决定上线。"])
+    let mixed = ConversationMindMap.parse("主题：发布计划\n暂未决定上线。\n* 测试\n  * 先检查字幕。\n- 发布\n  - 等待结果。")
+    #expect(mixed?.branches.map(\.title) == ["对话大意", "测试", "发布"])
+    #expect(mixed?.branches.first?.points == ["暂未决定上线。"])
+    #expect(mixed?.branches.dropFirst().first?.points == ["先检查字幕。"])
+    #expect(mixed?.branches.dropFirst(2).first?.points == ["等待结果。"])
+}
+
+@Test @MainActor func summaryStartupTimeoutIsDistinctAndStopsItsWorker() async throws {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("SummaryWorkerTimeout.\(UUID())")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let executable = folder.appendingPathComponent("llama-server")
+    try "#!/bin/sh\nexec /bin/sleep 5\n".write(to: executable, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+    let model = folder.appendingPathComponent("model.gguf")
+    try Data([1]).write(to: model)
+    let service = LocalSummaryService(assets: .init(executable: executable, model: model), startupTimeout: .milliseconds(20))
+    defer { service.cancel() }
+    do {
+        try await service.prepare()
+        Issue.record("An unready worker must time out")
+    } catch SummaryError.startupTimedOut {
+        // The missing-health path is distinct from worker exit and model absence.
+    } catch { Issue.record("Wrong startup error: \(error)") }
+}

@@ -18,12 +18,13 @@ StreamTranslate shows live English↔Chinese subtitles over other Mac apps. It c
 
 [View subtitle appearance settings](docs/screenshots/subtitle-appearance-1.6.0.png).
 
-## Latest update · 1.7.1
+## Latest update · 1.7.2
 
-- A collapsed **总结** tab on the floating window's right edge opens a local Chinese AI summary of the current conversation's topic, progress and unresolved questions.
+- The collapsed **总结** tab opens a connected Chinese mind map: a central topic, topic branches and concise points. Click branches to expand or fold them, or copy the text outline.
 - While expanded, the summary updates automatically from the current session's complete saved original text, including captions beyond the 100-row live cache. First expansion starts immediately; later changes coalesce for two seconds and draft text appears as it is generated.
 - **暂停**, **继续** and **重试** control automatic updates. A separate optional Qwen3-4B-Instruct-2507 worker uses two CPU threads and no GPU; folding cancels and releases it, and 15 seconds idle also releases it. Conversation text stays on the Mac.
 - The summary overlays the subtitle window without resizing its text width. AI output may omit or misstate details; check the original captions.
+- Model startup now shows elapsed time and distinguishes launch errors, worker exit codes and a 90-second startup budget. The reported startup failure's exact cause remains unconfirmed; model, preview, Release build and local installation checks passed for 1.7.2.
 
 See [summary installation, behavior and verification limits](docs/conversation-summary-1.7.0.md).
 Saved text history was introduced in 1.6.1; older diagnostic sessions are not imported. See
@@ -177,7 +178,9 @@ xcodebuild test \
   CODE_SIGNING_ALLOWED=NO
 ```
 
-For 1.7.1, 339 tests passed sequentially, including 13 summary tests, excluding the same seven shared-log tests and one installed-translation-assets test. Release build, local installation of 1.7.1/build 23 and strict signature verification passed. Synthetic-text inference streamed successfully; known summary misstatements, untested real ASR concurrency and other limits are recorded in [summary verification](docs/conversation-summary-1.7.0.md).
+For 1.7.2, 346 sequential tests passed, including 20 summary-focused tests, excluding seven shared-log tests and one installed-translation-assets test. Synthetic-text model inference, 300/620pt previews, Release build, local installation of 1.7.2/build 24 and strict signature verification passed. The model still produced unsupported wording, and real ASR concurrency remains unverified. See [verification and limits](docs/conversation-summary-1.7.0.md).
+
+Historical 1.7.1 verification: 339 tests passed sequentially, including 13 summary tests, excluding the same seven shared-log tests and one installed-translation-assets test. Release build, local installation of 1.7.1/build 23 and strict signature verification passed. Synthetic-text inference streamed successfully; known summary misstatements and untested real ASR concurrency remain documented.
 
 For the 1.6.1 local verification, 326 tests passed with `swift test --no-parallel --skip 'AppLoggerTests|companionInstalledTranslationRunsWithoutAnyWindow'`. The seven shared-log tests were excluded to preserve diagnostic evidence; the installed-assets translation test reported `notInstalled` in the test process. See [verification limits](docs/long-session-history-1.6.1.md).
 

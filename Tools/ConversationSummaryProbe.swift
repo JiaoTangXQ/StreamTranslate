@@ -1,10 +1,16 @@
 import Foundation
 import AppKit
 
-/// Synthetic text only. No user transcript, audio, preferences or shared log.
+/// Synthetic text only. No user transcript, audio or preferences. The production
+/// service may append process metadata to the shared diagnostic log.
 @main enum ConversationSummaryProbe {
     @MainActor static func main() async throws {
-        let service = LocalSummaryService()
+        let options = CommandLine.arguments
+        let override = options.firstIndex(of: "--model").flatMap { index -> LocalModelAssets? in
+            guard options.indices.contains(index + 1), let base = LocalSummaryService.assets else { return nil }
+            return LocalModelAssets(executable: base.executable, model: URL(fileURLWithPath: options[index + 1]))
+        }
+        let service = LocalSummaryService(assets: override)
         defer { service.cancel() }
         let start = Date()
         try await service.prepare()
@@ -25,8 +31,12 @@ import AppKit
         }
         print("STREAM UPDATE COUNT=\(updates)")
         print(text)
+        guard let map = ConversationMindMap.parse(text), map.topic != "本次对话", !map.branches.isEmpty else {
+            throw SummaryError.invalidResult
+        }
+        print("MINDMAP topic=\(map.topic) branches=\(map.branches.count)")
         print("SUMMARY COMPLETE seconds=\(Date().timeIntervalSince(start))")
-        let updated = try await service.summarize("补充讨论：暂时维持手动更新总结。有新字幕时显示更新提示，不持续自动推理。原来的静默停字幕问题仍需继续排查。", previous: text)
+        let updated = try await service.summarize("现在明确决定：展开脑图时自动更新，折叠后暂停，不再需要手动点击更新。原来的静默停字幕问题仍需继续排查。", previous: text)
         print("INCREMENTAL SUMMARY\n\(updated)")
         print("INCREMENTAL COMPLETE seconds=\(Date().timeIntervalSince(start))")
     }

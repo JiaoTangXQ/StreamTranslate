@@ -2,11 +2,17 @@
 
 ## Product boundary
 
-### Automatic local conversation summary (1.7.1 / build 23)
+### Automatic local conversation mind map (1.7.2 / build 24)
 
 `ConversationSummaryView` adds a default-collapsed right-edge tab over the existing
-native dark caption panel. First expansion immediately starts a Chinese topic-and-
-main-points summary. While expanded and unpaused, completed original-source changes
+native dark caption panel. First expansion immediately starts a Chinese outline:
+one central topic, normally 2–4 topic branches and 1–2 short points per branch.
+`ConversationMindMap` parses streamed text into `ConversationMindMapView`, a connected
+native tree. The first branch starts expanded; other branches fold, with click to
+toggle and a copy-outline action. The drawer is at most 380pt wide and supports a
+300pt caption window. Prose fallback retains the original output as a readable
+branch rather than inventing factual relationships. While expanded and unpaused,
+completed original-source changes
 schedule automatic updates after a two-second delay anchored to the first change;
 further changes do not postpone that scheduled update. Busy changes replace one
 latest pending request; no parallel inference or model instance is started. The
@@ -25,7 +31,12 @@ are approximate AI output, held in memory only, and are reset on capture-session
 change or clear. They are not summaries of older saved sessions.
 
 `LocalSummaryService` uses a separate Qwen3-4B-Instruct-2507 Q4_K_M model and private Unix socket,
-one request at a time, two utility CPU threads, no GPU. Continuous updates reuse
+one request at a time, two utility CPU threads, and explicit CPU-only startup:
+`--device none --no-kv-offload --no-op-offload --no-warmup`, in addition to `-ngl 0`.
+Older `-ngl 0` alone did not explicitly disable KV/op offload. The startup budget
+is now 90 seconds instead of 60, with elapsed loading time in the UI and distinct
+launch-error, startup-exit-code and timeout messages. AppLogger records only process
+metadata (PID, error/exit code and elapsed time), never transcript text. Continuous updates reuse
 one worker; after 15 seconds idle it is released even while expanded. New source
 after idle reloads the worker, but an unchanged source does not trigger inference.
 SSE output streams draft text into the drawer. Completed text, source keys and
@@ -44,18 +55,40 @@ The local `SystemLanguageModel` probe reported `deviceNotEligible`; this feature
 does not use Apple Foundation Models. Historical 1.7.0 synthetic-text inference
 observed preparation/first-generation/update times of 13.4/16.9/16.1s and a separate
 two-request sample peaked at about 3.7 GiB child RSS; these are not 1.7.1 measurements
-or guarantees. Current sequential regression passed 339 tests, including 13 summary
+or guarantees. Historical 1.7.1 sequential regression passed 339 tests, including 13 summary
 tests, with seven AppLoggerTests and one installed-translation-assets test excluded.
-Release build and strict signature verification passed; 1.7.1/build 23 is installed
-and launched, with 1.7.0 retained at `/Applications/StreamTranslate.app.previous`.
+That release build, strict signature verification and 1.7.1/build 23 installation
+passed, with 1.7.0 retained for rollback.
 Single-worker synthetic-text streaming observed preparation/first-visible-text/
 completion at 24.39/33.86/48.32s from probe start, with 71 update callbacks; the
 incremental request took 31.18s (79.50s cumulative). These are single samples.
 An initial probe timed out while an installed-app summary worker was also running;
 the isolated single-worker rerun succeeded and left no worker behind. The sample
 still retained outdated unresolved wording, so semantic consistency is not assured.
-Final 300pt states and 620pt completed preview passed, and independent review found
-no mandatory code changes. Native mouse/keyboard/VoiceOver, actual memory-pressure
+Those 300pt states and 620pt completed previews passed, and independent review found
+no mandatory code changes for 1.7.1. Current 1.7.2 sequential regression passed
+346 tests in 10.932s, including 20 summary-focused tests and five parser cases,
+with the same eight shared-log/installed-asset exclusions. The exit-42 and orphan-
+prose/star-bullet regressions were verified failing before the fixes and passing
+afterward. Synthetic-text mind-map inference observed readiness/first-visible/
+completion at 26.80/39.53/51.57s, 60 updates and four branches; incremental output
+completed at 82.54s cumulative (30.97s request). Peak child RSS was 3,760,000 KiB
+(about 3.59 GiB). The probe succeeded and left no model worker. These are single samples with
+the app/ASR closed, not real ASR concurrency evidence. The updated outline fixed
+old manual/undecided wording and retained the unresolved subtitle issue, but still
+turned writing requirements into a branch and added unsupported correction wording.
+300/620pt state previews passed and independent review found no required changes;
+physical scrolling, copy and AX operation are not verified by screenshots. Xcode
+Release build passed; 1.7.2/build 24 is installed and running, strict signature
+verification passed with unchanged signing identity, and 1.7.1 is retained at
+`/Applications/StreamTranslate.app.previous`. Older backups were archived by the
+existing installer; the user log was backed up under ignored `build/diagnosis/`
+before launch. Earlier startup samples, with installed ASR and
+translation helpers active, were 42.83s with old flags, 21.66s with explicit CPU
+settings and 15.82s with no warmup. They do not establish the screenshot failure's
+exact cause or latency guarantees. Old SIGABRT
+reports during termination cleanup do not by themselves identify that cause.
+Native mouse/keyboard/VoiceOver, actual memory-pressure
 behavior and real ASR concurrency remain unverified. Read
 `docs/conversation-summary-1.7.0.md` for setup, checks and limitations.
 

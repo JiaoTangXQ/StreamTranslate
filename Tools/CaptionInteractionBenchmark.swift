@@ -118,7 +118,7 @@ enum CaptionInteractionBenchmark {
                     var ready = false
                     for _ in 0..<200 {
                         switch state {
-                        case "loading": ready = stateModel.progress == "正在准备本地 AI…"
+                        case "loading": ready = stateModel.progress.hasPrefix("正在加载脑图模型")
                         case "streaming": ready = !stateModel.draftText.isEmpty
                         case "paused": ready = !stateModel.isGenerating && !stateModel.text.isEmpty
                         case "error": ready = stateModel.errorMessage != nil
@@ -203,10 +203,10 @@ enum CaptionInteractionBenchmark {
     }
     func summarize(_ text: String, previous: String, onUpdate: @escaping @MainActor (String) -> Void) async throws -> String {
         if state == "streaming" {
-            onUpdate("在聊什么\n讨论字幕体验，以及如何更容易跟上对话。\n\n主要内容\n新字幕产生后自动更新总结，生成中的文字逐步显示。")
+            onUpdate("主题：幸福与伴侣关系\n- 婚姻选择\n  - 有人看重住房条件。\n  - 发言者对此表达惊讶。\n- 幸福理解\n  - 正在讨论何为美好生活。")
             try await Task.sleep(for: .seconds(60))
         }
-        return "在聊什么\n讨论长时间使用后字幕卡顿，以及如何更容易跟上对话。\n\n主要内容\n悬浮窗只保留100条字幕，完整记录保存在本机。右侧增加可折叠的中文总结，展开时自动更新。静默停字幕的原因仍需排查。"
+        return "主题：幸福与伴侣关系\n- 婚姻选择\n  - 有人看重住房条件。\n  - 发言者对此表达惊讶。\n- 幸福理解\n  - 双方正在讨论何为美好生活。\n- 讨论状态\n  - 尚未形成一致结论。"
     }
     func cancel() {}
 }

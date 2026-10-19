@@ -8,12 +8,15 @@ struct ConversationSummaryView: View {
 
     private var summary: ConversationSummaryModel { viewModel.conversationSummary }
     private var displayedText: String { summary.draftText.isEmpty ? summary.text : summary.draftText }
+    private var mindMap: ConversationMindMap? {
+        ConversationMindMap.parse(summary.draftText, isDraft: true) ?? ConversationMindMap.parse(summary.text)
+    }
 
     var body: some View {
         GeometryReader { geometry in
             if summary.isExpanded {
                 drawer
-                    .frame(width: min(340, max(260, geometry.size.width - 20)))
+                    .frame(width: min(380, max(260, geometry.size.width - 20)))
                     .frame(maxHeight: .infinity)
                     .background(.black, in: RoundedRectangle(cornerRadius: 12))
                     .overlay(RoundedRectangle(cornerRadius: 12).stroke(.white.opacity(0.2)))
@@ -25,7 +28,7 @@ struct ConversationSummaryView: View {
                     viewModel.expandConversationSummary()
                 } label: {
                     VStack(spacing: 5) {
-                        Image(systemName: "text.alignleft")
+                    Image(systemName: "point.3.connected.trianglepath.dotted")
                         Text("总\n结").lineSpacing(2)
                     }
                     .font(.system(size: 12, weight: .medium))
@@ -52,10 +55,18 @@ struct ConversationSummaryView: View {
             HStack(spacing: 8) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("本次对话").font(.system(size: 14, weight: .semibold))
-                    Text("AI 总结 · 仅在本机处理").font(.system(size: 11))
+                    Text("AI 脑图 · 仅在本机处理").font(.system(size: 11))
                         .foregroundStyle(.white.opacity(0.7))
                 }
                 Spacer()
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(displayedText, forType: .string)
+                } label: {
+                    Image(systemName: "doc.on.doc").frame(width: 26, height: 30)
+                }
+                .buttonStyle(.plain).disabled(displayedText.isEmpty)
+                .accessibilityLabel("复制脑图文字").help("复制完整的主题、分支和要点")
                 Button { summary.collapse() } label: {
                     Image(systemName: "chevron.right").frame(width: 30, height: 30)
                 }
@@ -68,9 +79,8 @@ struct ConversationSummaryView: View {
             Divider().overlay(.white.opacity(0.15))
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    if !displayedText.isEmpty {
-                        Text(displayedText).font(.system(size: 13))
-                            .lineSpacing(5).textSelection(.enabled)
+                    if let mindMap {
+                        ConversationMindMapView(map: mindMap)
                         if !summary.isGenerating, let date = summary.completedAt {
                             HStack(spacing: 4) {
                                 Text("已梳理 \(summary.coveredCount) 条 ·")
@@ -79,9 +89,9 @@ struct ConversationSummaryView: View {
                             .font(.system(size: 11)).foregroundStyle(.white.opacity(0.65))
                         }
                     } else if !summary.isGenerating && summary.errorMessage == nil {
-                        Text("先听几句话，再来看大意。")
+                        Text("先听几句话，再来看脑图。")
                             .font(.system(size: 14, weight: .medium))
-                        Text("新字幕出现后会自动总结，概括本次对话的主题与主要内容。")
+                        Text("新字幕会自动整理为主题、话题分支和要点。点击分支可展开或收起。")
                             .font(.system(size: 12)).foregroundStyle(.white.opacity(0.7))
                     }
                     if summary.isGenerating {

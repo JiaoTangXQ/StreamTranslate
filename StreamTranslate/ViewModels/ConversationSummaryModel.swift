@@ -156,8 +156,18 @@ enum SummaryTranscript {
                     if activeService == nil {
                         let engine = self.makeService()
                         activeService = engine; self.service = engine
-                        self.progress = "正在准备本地 AI…"
-                        try await engine.prepare()
+                        self.progress = "正在加载脑图模型…"
+                        let started = ContinuousClock.now
+                        let ticker = Task { [weak self] in
+                            while !Task.isCancelled {
+                                do { try await Task.sleep(for: .seconds(1)) } catch { return }
+                                guard !Task.isCancelled, let self, self.generation == requestedGeneration else { return }
+                                self.progress = "正在加载脑图模型 · \(started.duration(to: .now).components.seconds) 秒"
+                            }
+                        }
+                        do { try await engine.prepare() }
+                        catch { ticker.cancel(); throw error }
+                        ticker.cancel()
                     }
                     guard let engine = activeService else { throw SummaryError.modelUnavailable }
                     for (index, chunk) in chunks.enumerated() {
