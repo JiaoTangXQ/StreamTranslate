@@ -10,17 +10,24 @@ import AppKit
             guard options.indices.contains(index + 1), let base = LocalSummaryService.assets else { return nil }
             return LocalModelAssets(executable: base.executable, model: URL(fileURLWithPath: options[index + 1]))
         }
-        let service = LocalSummaryService(assets: override)
+        let service: any ConversationSummaryProviding
+        if options.contains("--cloud") {
+            guard let configuration = SummaryCloudConfiguration.load() else { throw SummaryError.modelUnavailable }
+            service = CloudSummaryService(configuration: configuration)
+            print("SUMMARY CLOUD MODEL \(configuration.model)")
+        } else { service = LocalSummaryService(assets: override) }
         defer { service.cancel() }
         let start = Date()
         try await service.prepare()
         print("SUMMARY MODEL READY seconds=\(Date().timeIntervalSince(start))")
+        if let service = service as? LocalSummaryService {
         let budgetText = "[1] " + String(String(repeating: "记忆形成与城市住房政策涉及不同主体。", count: 70).prefix(899)) + "\n"
         let budgetIndex = String(String(repeating: "T10|discussion|节目中的不同主题与历史观点\n", count: 80).prefix(1_200))
         let tokens = try await service.promptTokenCount(budgetText, previous: budgetIndex)
         print("TOKEN_BUDGET prompt=\(tokens) output=1024 context=4096 source_chars=900 index_chars=1200")
         fflush(nil)
         guard tokens + 1_024 <= 4_096 else { throw SummaryError.invalidResult }
+        }
         let stages = [
             "本期节目由云声耳机赞助。前往购买页面输入优惠码，可以享受九折。广告到这里结束。",
             "欢迎回到节目。今天神经科学家讨论记忆如何形成，与刚才的赞助无关。海马体参与新的情景记忆形成，睡眠有助于巩固记忆。",
@@ -48,7 +55,7 @@ import AppKit
             var updates = 0, firstPoint = false
             var lastPartial = ""
             let output: String
-            do { output = try await service.summarize(batch.input, previous: map.context(for: batch.input)) { partial in
+            do { output = try await service.summarize(batch.input, previous: map.context(for: batch.input), validating: { _ = try before.adding($0, batch: batch) }) { partial in
                 lastPartial = partial
                 updates += 1
                 if !firstPoint, let preview = try? before.adding(partial, batch: batch, isDraft: true), preview.outline != before.outline {
@@ -111,7 +118,7 @@ import AppKit
         var densePartial = ""
         let additions: String
         do {
-            additions = try await service.summarize(denseBatch.input, previous: map.context(for: denseBatch.input)) { densePartial = $0 }
+            additions = try await service.summarize(denseBatch.input, previous: map.context(for: denseBatch.input), validating: { _ = try old.adding($0, batch: denseBatch) }) { densePartial = $0 }
         } catch {
             print("DENSE SERVICE_FAILED last_partial=\(densePartial)"); fflush(nil)
             throw error

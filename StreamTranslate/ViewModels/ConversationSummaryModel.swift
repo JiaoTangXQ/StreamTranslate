@@ -49,6 +49,7 @@ enum SummaryTranscript {
     private(set) var draftText = ""
     private(set) var isGenerating = false
     private(set) var isUpdateScheduled = false
+    private(set) var backendDescription = "AI 脑图 · 自动选择"
     private(set) var progress = ""
     private(set) var errorMessage: String?
     private(set) var coveredCount = 0
@@ -71,7 +72,7 @@ enum SummaryTranscript {
     @ObservationIgnored private var pending: Request?
 
     init(updateDelay: Duration = .seconds(2), idleTimeout: Duration = .seconds(15),
-         makeService: @escaping () -> any ConversationSummaryProviding = { LocalSummaryService() }) {
+         makeService: @escaping () -> any ConversationSummaryProviding = { AutomaticSummaryService() }) {
         self.updateDelay = updateDelay; self.idleTimeout = idleTimeout
         self.makeService = makeService
     }
@@ -130,7 +131,7 @@ enum SummaryTranscript {
         let monitor = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)
         monitor.setEventHandler { [weak self] in
             Task { @MainActor [weak self] in
-                guard let self, self.generation == requestedGeneration else { return }
+                guard let self, self.generation == requestedGeneration, self.service?.usesLocalModel == true else { return }
                 self.pauseAutomaticUpdates()
                 self.errorMessage = "系统内存紧张，已暂停总结以减少占用。可稍后重试。"
             }
@@ -178,13 +179,15 @@ enum SummaryTranscript {
                     if activeService == nil {
                         let engine = self.makeService()
                         activeService = engine; self.service = engine
-                        self.progress = "正在加载脑图模型…"
+                        self.backendDescription = engine.backendDescription
+                        self.progress = "正在准备脑图服务…"
                         let started = ContinuousClock.now
                         let ticker = Task { [weak self] in
                             while !Task.isCancelled {
                                 do { try await Task.sleep(for: .seconds(1)) } catch { return }
                                 guard !Task.isCancelled, let self, self.generation == requestedGeneration else { return }
-                                self.progress = "正在加载脑图模型 · \(started.duration(to: .now).components.seconds) 秒"
+                                self.backendDescription = engine.backendDescription
+                                self.progress = "正在准备脑图服务 · \(started.duration(to: .now).components.seconds) 秒"
                             }
                         }
                         do { try await engine.prepare() }
@@ -199,8 +202,12 @@ enum SummaryTranscript {
                         let baseline = result
                         let correctedSources = Set(batch.records.map(\.sourceID)).intersection(affected)
                         let linked = previousMap.topicIDs(for: correctedSources)
-                        let additions = try await engine.summarize(batch.input, previous: baseline.context(for: batch.input, including: linked)) { [weak self] partial in
+                        let additions = try await engine.summarize(batch.input, previous: baseline.context(for: batch.input, including: linked), validating: { output in
+                            _ = try baseline.adding(output, batch: batch)
+                        }) { [weak self] partial in
                             guard let self, self.generation == requestedGeneration, !Task.isCancelled else { return }
+                            self.backendDescription = engine.backendDescription
+                            if partial.isEmpty { self.draftMap = baseline; self.draftText = baseline.outline; return }
                             if let preview = try? baseline.adding(partial, batch: batch, isDraft: true) {
                                 let outline = preview.outline
                                 if outline != self.draftText {
@@ -210,6 +217,7 @@ enum SummaryTranscript {
                         }
                         try Task.checkCancellation()
                         guard self.generation == requestedGeneration else { return }
+                        self.backendDescription = engine.backendDescription
                         result = try baseline.adding(additions, batch: batch)
                         self.draftMap = result; self.draftText = result.outline
                     }

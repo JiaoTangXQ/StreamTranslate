@@ -18,12 +18,13 @@ StreamTranslate shows live English↔Chinese subtitles over other Mac apps. It c
 
 [View subtitle appearance settings](docs/screenshots/subtitle-appearance-1.6.0.png).
 
-## Latest update · 1.7.3
+## Latest update · 1.8.0
 
 - The collapsed **总结** tab opens independent topic trees. Advertisements, discussion and uncertain content have separate roots; advertisements start as compact folded rows. Click topics or branches to expand them, or copy the outline.
 - New content adds points to its topic; new roots stay separate even when their titles match, and returning subjects can extend earlier topics. Existing titles and tree order stay fixed. Source corrections replace only dependent points.
 - While expanded, the summary updates automatically from the current session's complete saved original text, including captions beyond the 100-row live cache. First expansion starts immediately; later changes coalesce for two seconds and draft text appears as it is generated.
-- **暂停**, **继续** and **重试** control automatic updates. A separate optional Qwen3-4B-Instruct-2507 worker uses two CPU threads and no GPU; folding cancels and releases it, and 15 seconds idle also releases it. Conversation text stays on the Mac.
+- **暂停**, **继续** and **重试** control automatic updates. With private API configuration, summaries use the cloud first and automatically fall back to the existing local Qwen3-4B-Instruct-2507 on failure. A successful cloud request never loads the local summary model. The header identifies the active mode. Without API configuration, summaries remain local.
+- Cloud summaries send new source-text batches and topic labels to the configured provider; audio, recognition, source review and translation retain their existing local paths. Credentials stay in ignored `.env` files outside the app bundle. See [summary API configuration and fallback](docs/cloud-summary-1.8.0.md).
 - The summary overlays the subtitle window without resizing its text width. AI topic classification and wording can be wrong; check the original captions. At 300 topics or 6,000 facts, additions pause before exceeding the limit and retain the previous completed map; the full transcript stays available.
 
 See [summary installation, behavior and verification limits](docs/conversation-summary-1.7.0.md).
@@ -51,9 +52,9 @@ Fixed English and Mandarin have Apple's continuous on-device speech transcriber.
 - Microphone and ScreenCaptureKit watchdogs rebuild stalled capture after about three seconds
 - Audio, speech recognition, and translation stay on the Mac
 - Optional Qwen source review and bidirectional Hy-MT final refinement update the same caption; guarded revisions, timeouts and memory-pressure fallback retain the fast system path
-- Optional local conversation summaries update automatically while their drawer is expanded, use the full current-session original transcript, and are not saved across app relaunches
+- Optional conversation summaries update automatically while their drawer is expanded, use the full current-session original transcript, and are not saved across app relaunches
 
-The transcription/translation pipeline uses network access to install missing language assets or optional models/runtimes. Enabling phone subtitles also requires a LAN connection or, for the optional remote relay, Internet access. Audio recognition and translation processing remain local.
+The transcription/translation pipeline uses network access to install missing language assets or optional models/runtimes. Enabling phone subtitles also requires a LAN connection or, for the optional remote relay, Internet access. Audio recognition and translation processing remain local. Configured cloud summaries upload source-text batches and topic labels to the selected provider.
 
 ## Requirements
 
@@ -178,7 +179,9 @@ xcodebuild test \
   CODE_SIGNING_ALLOWED=NO
 ```
 
-For 1.7.3, 360 sequential tests passed, including 34 summary-focused tests, excluding seven shared-log tests and one installed-translation fixture. Nine summary previews, a five-stage production-model replay, Release build, local installation of 1.7.3/build 25 and strict signature verification passed. The synthetic replay does not establish general classification accuracy or real ASR concurrency. See [verification and limits](docs/conversation-summary-1.7.0.md).
+For 1.8.0, 371 sequential tests passed, including 45 summary-related tests, with the same eight exclusions below. The configured API passed the five-stage synthetic SSE/apply replay in 8.181 seconds without starting a local summary worker. Release, local installation of 1.8.0/build 26, strict signing and credential-exclusion checks passed. See [cloud summary verification and limits](docs/cloud-summary-1.8.0.md).
+
+Historical 1.7.3 verification: 360 sequential tests passed, including 34 summary-focused tests, excluding seven shared-log tests and one installed-translation fixture. Nine summary previews, a five-stage production-model replay, Release build, local installation of 1.7.3/build 25 and strict signature verification passed. The synthetic replay does not establish general classification accuracy or real ASR concurrency. See [verification and limits](docs/conversation-summary-1.7.0.md).
 
 Historical 1.7.2 verification: 346 sequential tests passed, including 20 summary-focused tests, excluding seven shared-log tests and one installed-translation-assets test. Synthetic-text model inference, 300/620pt previews, Release build, local installation of 1.7.2/build 24 and strict signature verification passed. The model still produced unsupported wording, and real ASR concurrency remains unverified.
 

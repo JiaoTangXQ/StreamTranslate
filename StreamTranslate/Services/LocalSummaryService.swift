@@ -2,13 +2,29 @@ import Foundation
 import Darwin
 
 @MainActor protocol ConversationSummaryProviding: AnyObject {
+    var backendDescription: String { get }
+    var usesLocalModel: Bool { get }
     func prepare() async throws
     func summarize(_ text: String, previous: String,
+                   onUpdate: @escaping @MainActor (String) -> Void) async throws -> String
+    func summarize(_ text: String, previous: String,
+                   validating: @escaping @MainActor (String) throws -> Void,
                    onUpdate: @escaping @MainActor (String) -> Void) async throws -> String
     func cancel()
 }
 
 extension ConversationSummaryProviding {
+    var backendDescription: String { "AI 脑图 · 仅在本机处理" }
+    var usesLocalModel: Bool { true }
+    func summarize(_ text: String, previous: String,
+                   validating validate: @escaping @MainActor (String) throws -> Void,
+                   onUpdate: @escaping @MainActor (String) -> Void) async throws -> String {
+        let output = try await summarize(text, previous: previous, onUpdate: onUpdate)
+        try Task.checkCancellation()
+        try validate(output)
+        return output
+    }
+
     func summarize(_ text: String, previous: String) async throws -> String {
         try await summarize(text, previous: previous, onUpdate: { _ in })
     }
@@ -29,8 +45,14 @@ struct SummaryEventDecoder {
             guard line.starts(with: Data("data:".utf8)) else { continue }
             let payload = line.dropFirst(5).drop(while: { $0 == 32 })
             if String(decoding: payload, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) == "[DONE]" { continue }
-            guard let object = try JSONSerialization.jsonObject(with: Data(payload)) as? [String: Any],
-                  let choices = object["choices"] as? [[String: Any]], let choice = choices.first else {
+            guard let object = try JSONSerialization.jsonObject(with: Data(payload)) as? [String: Any] else {
+                throw SummaryError.invalidResult
+            }
+            // OpenAI-compatible gateways may append accounting metadata with
+            // choices:[] or no choices field. It never completes a response.
+            if object["error"] == nil, object["usage"] is [String: Any],
+               (object["choices"] == nil || (object["choices"] as? [[String: Any]])?.isEmpty == true) { continue }
+            guard let choices = object["choices"] as? [[String: Any]], let choice = choices.first else {
                 throw SummaryError.invalidResult
             }
             if let reason = choice["finish_reason"] as? String {
@@ -200,7 +222,7 @@ struct SummaryEventDecoder {
         return ["type": "json_schema", "json_schema": ["name": "topic_additions", "strict": true, "schema": schema]]
     }
 
-    private static func messages(_ text: String, previous: String) throws -> [[String: String]] {
+    static func messages(_ text: String, previous: String) throws -> [[String: String]] {
         let previousData = try JSONSerialization.data(withJSONObject: ["已有话题目录（只读）": previous])
         let newData = try JSONSerialization.data(withJSONObject: ["新增记录": text])
         let input = "已有话题目录（只供归类，不要重写）：\n" + String(decoding: previousData, as: UTF8.self)

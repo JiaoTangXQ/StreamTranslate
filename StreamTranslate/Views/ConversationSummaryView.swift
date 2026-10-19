@@ -52,7 +52,7 @@ struct ConversationSummaryView: View {
             HStack(spacing: 8) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("本次对话").font(.system(size: 14, weight: .semibold))
-                    Text("AI 脑图 · 仅在本机处理").font(.system(size: 11))
+                    Text(summary.backendDescription).font(.system(size: 11))
                         .foregroundStyle(.white.opacity(0.7))
                 }
                 Spacer()

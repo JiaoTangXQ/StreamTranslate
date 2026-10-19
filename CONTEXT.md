@@ -2,6 +2,40 @@
 
 ## Product boundary
 
+### Cloud-first summary provider (1.8.0 / build 26)
+
+`AutomaticSummaryService` is the default provider for `ConversationSummaryModel`.
+It reads summary-only configuration from ignored root `.env` or the installed
+`~/Library/Application Support/StreamTranslate/Configuration/.env` (mode 600,
+parent 700), with file values taking precedence over process variables. An explicit
+`STREAMTRANSLATE_SUMMARY_ENV` may select a file. Installation copies only the
+summary keys outside the signed app; configuration is never bundled or committed.
+No ASR, Qwen review or translation service reads these settings or changes behavior.
+
+Configured summaries use the Zhizengzeng OpenAI-compatible Chat Completions API
+and the selected model (currently `deepseek-v4.1-flash`). Only new text and routing
+labels are sent; no audio. An ephemeral HTTPS URLSession streams SSE, rejects
+redirects, keeps certificate validation and logs no provider body or key. Requests
+are serial, capped at 2048 output tokens, with a 15s idle/45s resource timeout.
+Cloud success never starts a local summary worker. Without configuration, local
+summary behavior remains available. The drawer reports the selected provider.
+
+HTTP/network/truncation or map-validation failures retry the same batch locally;
+the old complete map is preserved until success. One shared 60s cooldown avoids
+request storms across idle releases. Existing local workers are released before
+retrying cloud; local fallback reuses one worker. Cancellation never initiates
+fallback; capacity errors do not load a model just to retry. Memory warnings pause
+summary only while it uses a local model. The translation memory-pressure handler
+is unchanged. Final sequential regression passed 371 tests (45 summary-related)
+in 11.378s, excluding seven shared-log and one installed-translation test. The
+production API five-stage synthetic replay passed in 8.181s with eight dense
+additions, unrelated roots/evidence unchanged and no local worker spawned.
+Provider output can still be malformed or semantically wrong; validation is not
+entailment proof. Release build and strict signature verification passed;
+1.8.0/build 26 is installed and running with the same signing root. Secret scans
+found no API key in the app bundle or publishable files. See
+`docs/cloud-summary-1.8.0.md` for verification and limits.
+
 ### Append-only local topic forest (1.7.3 / build 25)
 
 `ConversationSummaryView` adds a default-collapsed right-edge tab over the existing

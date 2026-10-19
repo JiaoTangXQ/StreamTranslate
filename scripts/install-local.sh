@@ -67,6 +67,8 @@ if [[ "$designated_requirement" == *'designated => cdhash'* ]]; then
     exit 1
 fi
 
+python3 "$script_dir/install-summary-env.py"
+
 osascript -e 'tell application id "com.jiaotangxq.StreamTranslate" to quit' 2>/dev/null || true
 for _ in {1..20}; do
     pgrep -x StreamTranslate >/dev/null || break
