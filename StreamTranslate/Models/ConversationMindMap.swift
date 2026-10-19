@@ -17,6 +17,7 @@ struct ConversationMindMap: Equatable, Sendable {
     struct Point: Equatable, Identifiable, Sendable {
         let id: String
         let text: String
+        let detail: String
         var sources: Set<UUID>
     }
     struct Branch: Equatable, Identifiable, Sendable {
@@ -39,12 +40,16 @@ struct ConversationMindMap: Equatable, Sendable {
     var outline: String {
         topics.filter { $0.branches.contains { !$0.points.isEmpty } }.map { topic in
             "\(topic.kind.label)：\(topic.title)\n" + topic.branches.filter { !$0.points.isEmpty }.map { branch in
-                "- \(branch.title)\n" + branch.points.map { "  - \($0.text)" }.joined(separator: "\n")
+                "- \(branch.title)\n" + branch.points.map {
+                    "  - \($0.text)" + ($0.detail.isEmpty ? "" : "\n    " + $0.detail)
+                }.joined(separator: "\n")
             }.joined(separator: "\n")
         }.joined(separator: "\n\n")
     }
 
-    /// Bounded routing index, not a request to regenerate the entire forest.
+    /// Read-only routing and duplicate index. Short nodes are comparison labels,
+    /// never new evidence. A bounded note helps distinguish new qualifiers from
+    /// repetitions; the complete historical outline is never sent wholesale.
     func context(for input: String = "", including linked: Set<String> = [], limit: Int = 1_200) -> String {
         var lines: [String] = [], size = 0
         let terms = Self.terms(input)
@@ -63,9 +68,24 @@ struct ConversationMindMap: Equatable, Sendable {
         for index in order {
             let topic = topics[index]
             var line = "\(topic.id)|\(topic.kind.rawValue)|\(topic.title)"
+            guard size + line.count + 1 <= limit else { continue }
             if lines.count < 3 {
-                for branch in topic.branches.suffix(4) {
-                    line += "\n \(branch.id)|\(branch.title)"
+                for branch in topic.branches.prefix(6) {
+                    let heading = "\n \(branch.id)|\(branch.title)"
+                    guard size + line.count + heading.count + 1 <= limit else { break }
+                    line += heading
+                    // Retain core early nodes and recent developments. Positions
+                    // are resolved only against this request's immutable baseline.
+                    let indices = Set(branch.points.indices.prefix(2)).union(branch.points.indices.suffix(3)).sorted()
+                    for pointIndex in indices {
+                        let point = branch.points[pointIndex]
+                        let label = try? JSONSerialization.data(withJSONObject: [
+                            "node": String(point.text.prefix(40)), "note": String(point.detail.prefix(64))
+                        ], options: [.sortedKeys])
+                        let node = "\n  P\(pointIndex + 1)|" + String(decoding: label ?? Data(), as: UTF8.self)
+                        guard size + line.count + node.count + 1 <= limit else { break }
+                        line += node
+                    }
                 }
             }
             guard size + line.count + 1 <= limit else { continue }
@@ -112,6 +132,8 @@ struct ConversationMindMap: Equatable, Sendable {
         let title: String?
         let branch: String
         let text: String
+        let detail: String?
+        let match: String?
         let sources: [Int]
     }
 
@@ -133,13 +155,28 @@ struct ConversationMindMap: Equatable, Sendable {
                 throw SummaryError.invalidResult
             }
             guard count <= 8, !addition.text.trimmingCharacters(in: .whitespaces).isEmpty,
-                  addition.text.count <= 240, !addition.sources.isEmpty,
+                  addition.text.count <= 40, (addition.detail?.count ?? 0) <= 160, !addition.sources.isEmpty,
                   addition.sources.allSatisfy({ $0 > 0 && $0 <= batch.records.count }),
                   addition.branch.count <= 60, addition.branch.rangeOfCharacter(from: .newlines) == nil,
                   !addition.branch.contains("|") else { throw SummaryError.invalidResult }
             let trimmedBranch = addition.branch.trimmingCharacters(in: .whitespacesAndNewlines)
             let branchTitle = trimmedBranch.isEmpty ? "要点" : trimmedBranch
             let sources = Set(addition.sources.map { batch.records[$0 - 1].sourceID })
+            if let match = addition.match, !match.isEmpty {
+                guard match.range(of: #"^P[1-9][0-9]*$"#, options: .regularExpression) != nil,
+                      let nodeNumber = Int(match.dropFirst()),
+                      let topic = topics.first(where: { $0.id == addition.topic && $0.kind == addition.kind }),
+                      let originalBranch = topic.branches.first(where: { $0.id == branchTitle || Self.key($0.title) == Self.key(branchTitle) }),
+                      originalBranch.points.indices.contains(nodeNumber - 1),
+                      let ti = result.topics.firstIndex(where: { $0.id == topic.id }),
+                      let bi = result.topics[ti].branches.firstIndex(where: { $0.id == originalBranch.id }) else {
+                    throw SummaryError.invalidResult
+                }
+                // A repeated mention adds provenance, never rewrites or moves a
+                // node. New qualifiers/decisions must arrive as distinct nodes.
+                result.topics[ti].branches[bi].points[nodeNumber - 1].sources.formUnion(sources)
+                continue
+            }
             let alias = addition.topic + "|" + addition.kind.rawValue
             var topicIndex: Int?
             if let existing = topics.firstIndex(where: { $0.id == addition.topic }), topics[existing].kind == addition.kind {
@@ -181,16 +218,19 @@ struct ConversationMindMap: Equatable, Sendable {
                 branchIndex = result.topics[topicIndex].branches.count - 1
             }
             let branch = branchIndex!
-            if let existing = result.topics[topicIndex].branches[branch].points.firstIndex(where: { Self.key($0.text) == Self.key(addition.text) }) {
+            let detail = addition.detail?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if let existing = result.topics[topicIndex].branches[branch].points.firstIndex(where: {
+                Self.key($0.text) == Self.key(addition.text) && Self.key($0.detail) == Self.key(detail)
+            }) {
                 result.topics[topicIndex].branches[branch].points[existing].sources.formUnion(sources)
             } else {
                 guard result.topics.reduce(0, { $0 + $1.branches.reduce(0, { $0 + $1.points.count }) }) < 6_000 else {
                     throw SummaryError.mapCapacityReached
                 }
                 let identity = result.topics[topicIndex].id + "/" + result.topics[topicIndex].branches[branch].id
-                    + sources.map(\.uuidString).sorted().joined(separator: "/") + addition.text
+                    + sources.map(\.uuidString).sorted().joined(separator: "/") + addition.text + detail
                 let id = SHA256.hash(data: Data(identity.utf8)).map { String(format: "%02x", $0) }.joined()
-                result.topics[topicIndex].branches[branch].points.append(Point(id: id, text: addition.text, sources: sources))
+                result.topics[topicIndex].branches[branch].points.append(Point(id: id, text: addition.text, detail: detail, sources: sources))
             }
         }
         guard isDraft || count > 0 || (output.trimmingCharacters(in: .whitespacesAndNewlines) == "[]" || lines.isEmpty) else {

@@ -28,6 +28,10 @@ import AppKit
         fflush(nil)
         guard tokens + 1_024 <= 4_096 else { throw SummaryError.invalidResult }
         }
+        if options.contains("--mindmap") {
+            try await verifyMindMap(service: service, start: start)
+            return
+        }
         let stages = [
             "本期节目由云声耳机赞助。前往购买页面输入优惠码，可以享受九折。广告到这里结束。",
             "欢迎回到节目。今天神经科学家讨论记忆如何形成，与刚才的赞助无关。海马体参与新的情景记忆形成，睡眠有助于巩固记忆。",
@@ -132,11 +136,75 @@ import AppKit
         let newSources = Set(denseBatch.records.map(\.sourceID))
         let newPoints = map.topics.flatMap(\.branches).flatMap(\.points).filter { !$0.sources.isDisjoint(with: newSources) }
         let combinesSources = newPoints.contains { $0.sources.intersection(newSources).count >= 2 }
-        let concise = newPoints.allSatisfy { $0.text.count <= 96 && $0.text.filter { $0 == "；" || $0 == ";" }.count <= 1 }
+        let concise = newPoints.allSatisfy { $0.text.count <= 40 && $0.text.filter { $0 == "；" || $0 == ";" }.count <= 1 }
             && newPoints.reduce(0) { $0 + $1.text.count } <= 180
         guard (1...3).contains(added), combinesSources, concise, map.topics.count == 3, map.topics[0] == old.topics[0], map.topics[2] == old.topics[2] else {
             throw SummaryError.invalidResult
         }
         print("PASS dense_fact_batch_consolidated_into_1_to_3_updates_with_combined_sources")
     }
+    /// Repeated paraphrases, named branches, stable identity, and genuinely new
+    /// qualifiers exercise the production incremental path, not a static mock.
+    @MainActor private static func verifyMindMap(service: any ConversationSummaryProviding, start: Date) async throws {
+        let stages = [
+            "This episode is sponsored by CloudTone headphones. Use the promo code for ten percent off. The advertisement ends here.",
+            "Now our main conversation: what makes coding AI successful. To train an effective coding AI, you need enough coding training data. Very few organizations have enough: Anthropic, OpenAI, and Cursor. Perhaps Google also has enough, but that is only a possibility.",
+            "You really have to have the data to train a useful coding AI. The organizations with enough coding data are Anthropic, OpenAI and Cursor, and arguably perhaps Google. Without sufficient code data, that training cannot work.",
+            "Continuing with coding AI success: without coding ability, AI usefulness is limited. Success also needs talented people and compute. A good enterprise sales team and relationships with thousands of companies are commercial conditions. Cursor has many talented people.",
+            "So, basically, if your AI cannot do coding, it will not be very useful. It takes talented people and compute, and also a good enterprise sales team with relationships across thousands of companies. Cursor has a lot of talented people.",
+            "Now a separate event: the city council is debating rent controls. Supporters expect benefits for renters; opponents fear reduced rental supply. No vote has been held yet.",
+            "Returning to coding AI: the speaker corrects the earlier possibility about Google. Google does not have enough coding training data. The earlier suggestion that Google might have enough is withdrawn."
+        ]
+        var map = ConversationMindMap()
+        var primaryID = ""
+        for (index, text) in stages.enumerated() {
+            let batch = SummaryTranscript.batches([CaptionEntry(timestamp: .now, englishText: text, chineseText: "")])[0]
+            let baseline = map
+            let context = baseline.context(for: batch.input)
+            var partial = ""
+            let output: String
+            do {
+                output = try await service.summarize(batch.input, previous: context, validating: { _ = try baseline.adding($0, batch: batch) }) { partial = $0 }
+            } catch {
+                print("MINDMAP FAILED STAGE=\(index + 1) CONTEXT\n" + context + "\nLAST_PATCH\n" + partial)
+                fflush(nil)
+                throw error
+            }
+            print("MINDMAP STAGE=\(index + 1) PATCH\n" + output)
+            map = try baseline.adding(output, batch: batch)
+            print("FOREST\n" + map.outline); fflush(nil)
+            if index == 0 {
+                guard map.topics.count == 1, map.topics[0].kind == .advertisement else { throw SummaryError.invalidResult }
+            } else {
+                guard map.topics[0] == baseline.topics[0] else { throw SummaryError.invalidResult }
+            }
+            if index == 1 {
+                guard map.topics.count == 2, map.topics[1].kind == .discussion else { throw SummaryError.invalidResult }
+                primaryID = map.topics[1].id
+            }
+            if index == 2 || index == 4 {
+                let old = baseline.topics.flatMap(\.branches).flatMap(\.points)
+                let new = map.topics.flatMap(\.branches).flatMap(\.points)
+                guard new.map(\.id) == old.map(\.id), map.topics.count == baseline.topics.count else { throw SummaryError.invalidResult }
+                print("PASS repeated_paraphrase_adds_no_nodes stage=\(index + 1)")
+            }
+            if index == 3 {
+                guard let topic = map.topics.first(where: { $0.id == primaryID }), topic.branches.count >= 3,
+                      topic.branches.allSatisfy({ !["要点", "总结"].contains($0.title) && $0.points.allSatisfy { $0.text.count <= 40 } }) else { throw SummaryError.invalidResult }
+                print("PASS meaningful_branches_and_short_nodes")
+            }
+            if index == 5 {
+                guard map.topics.count == 3, map.topics[1] == baseline.topics[1] else { throw SummaryError.invalidResult }
+            }
+            if index == 6 {
+                guard map.topics.count == 3, map.topics[2] == baseline.topics[2],
+                      let before = baseline.topics.first(where: { $0.id == primaryID }),
+                      let after = map.topics.first(where: { $0.id == primaryID }),
+                      after.branches.flatMap(\.points).count > before.branches.flatMap(\.points).count else { throw SummaryError.invalidResult }
+                print("PASS correction_is_new_node_without_rewriting_other_topics")
+            }
+        }
+        print("MINDMAP COMPLETE seconds=\(Date().timeIntervalSince(start)) topics=\(map.topics.count)")
+    }
+
 }

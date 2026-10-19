@@ -87,10 +87,10 @@ enum CaptionInteractionBenchmark {
                 let summary = ConversationSummaryModel { SummaryPreviewProvider() }
                 let previewVM = CaptionViewModel(conversationSummary: summary)
                 previewVM.captionHistory = [
-                    CaptionEntry(timestamp: .distantPast, englishText: "We want to give you a little background on who we are and what we do.", chineseText: "我们先介绍一下团队是谁，以及平时在做什么。"),
-                    CaptionEntry(timestamp: .distantPast, englishText: "The goal is to show how AI can help with the repetitive work we do every day.", chineseText: "这次想通过具体例子，说明 AI 如何帮助处理每天重复的工作。"),
-                    CaptionEntry(timestamp: .distantPast, englishText: "Start with a task you repeat. Then decide which steps would benefit from AI.", chineseText: "先找一项反复做的任务，再判断哪些步骤适合交给 AI。"),
-                    CaptionEntry(timestamp: .distantPast, englishText: "The point is to free up your time, so you can focus on work that needs your judgment.", chineseText: "目的是把时间还给你，让你专注于真正需要自己判断的事情。")
+                    CaptionEntry(timestamp: .distantPast, englishText: "To train an effective coding AI, you need enough coding training data.", chineseText: "训练有效的编程 AI，需要足量的代码训练数据。"),
+                    CaptionEntry(timestamp: .distantPast, englishText: "Only a few organizations have enough data: Anthropic, OpenAI, Cursor, and arguably Google.", chineseText: "只有少数组织拥有足量数据，包括 Anthropic、OpenAI、Cursor，Google 可能也算。"),
+                    CaptionEntry(timestamp: .distantPast, englishText: "If your AI cannot code, it is not going to be very useful.", chineseText: "如果 AI 不具备编程能力，实用性就会受限。"),
+                    CaptionEntry(timestamp: .distantPast, englishText: "Success also needs talent, compute, enterprise sales, and relationships with customers.", chineseText: "成功还需要人才、算力、企业销售，以及客户关系。")
                 ]
                 previewVM.isModelReady = true
                 previewVM.isTranslationReady = true
@@ -103,6 +103,7 @@ enum CaptionInteractionBenchmark {
                     if !summary.isGenerating { break }
                     try await Task.sleep(for: .milliseconds(10))
                 }
+                var measuredSplits = 0
                 for (width, height) in [(980.0, 420.0), (780.0, 360.0), (620.0, 360.0), (300.0, 360.0), (980.0, 640.0)] {
                     panel.setContentSize(NSSize(width: width, height: height))
                     try await Task.sleep(for: .milliseconds(100))
@@ -110,21 +111,20 @@ enum CaptionInteractionBenchmark {
                     try screenshot(summaryHost, to: output.appendingPathComponent("summary-\(Int(width))\(suffix).png"))
                     if width >= 780 {
                         let fields = descendants(of: summaryHost).compactMap { $0 as? NSTextField }
-                        let outlineTexts = Set(summary.map.topics.flatMap(\.branches).flatMap(\.points).map(\.text))
-                        guard let point = fields.first(where: { outlineTexts.contains($0.stringValue) }) else {
-                            print("FAIL: no selectable outline text in split preview")
-                            throw CocoaError(.validationMissingMandatoryProperty)
-                        }
-                        do {
+                        let texts = Set(summary.map.topics.flatMap(\.branches).flatMap(\.points).map(\.text))
+                        if let point = fields.first(where: { texts.contains($0.stringValue) }) {
                             let summaryX = point.convert(point.bounds, to: summaryHost).minX
                             for text in previewVM.captionHistory {
                                 for field in fields where field.stringValue == text.englishText || field.stringValue == text.chineseText {
-                                    guard field.convert(field.bounds, to: summaryHost).maxX < summaryX else {
-                                        throw CocoaError(.validationMissingMandatoryProperty)
-                                    }
+                                    guard field.convert(field.bounds, to: summaryHost).maxX < summaryX else { throw CocoaError(.validationMissingMandatoryProperty) }
                                 }
                             }
-                            print("SPLIT NONOVERLAP width=\(width)")
+                            measuredSplits += 1
+                            print("SPLIT NONOVERLAP width=\(width) height=\(height)")
+                        } else {
+                            // Short panes intentionally hide leaves in the branch
+                            // overview; screenshots cover these column states.
+                            print("SPLIT OVERVIEW width=\(width) height=\(height); no native leaf fields to measure")
                         }
                     }
                     if width == 300,
@@ -135,8 +135,18 @@ enum CaptionInteractionBenchmark {
                         try screenshot(summaryHost, to: output.appendingPathComponent("compact-captions-300.png"))
                         segmented.selectedSegment = 1
                         _ = segmented.sendAction(segmented.action, to: segmented.target)
+                        try await Task.sleep(for: .milliseconds(100))
+                        try click(panel, at: NSPoint(x: 100, y: summaryHost.bounds.height - 170))
+                        try await Task.sleep(for: .milliseconds(100))
+                        try screenshot(summaryHost, to: output.appendingPathComponent("summary-300-expanded.png"))
+                        try click(panel, at: NSPoint(x: 150, y: summaryHost.bounds.height - 205))
+                        try await Task.sleep(for: .milliseconds(100))
+                        guard descendants(of: summaryHost).compactMap({ $0 as? NSTextField }).contains(where: { $0.stringValue.contains("发言者认为，仅少数组织") }) else { throw CocoaError(.validationMissingMandatoryProperty) }
+                        try screenshot(summaryHost, to: output.appendingPathComponent("summary-300-detail.png"))
+                        print("DISCLOSURES branch and node explanation are operable")
                     }
                 }
+                guard measuredSplits > 0 else { throw CocoaError(.validationMissingMandatoryProperty) }
                 panel.setContentSize(NSSize(width: 300, height: 360))
                 // The panel stays dark even when the surrounding system is Light.
                 panel.appearance = NSAppearance(named: .aqua)
@@ -234,6 +244,17 @@ enum CaptionInteractionBenchmark {
         try png.write(to: url)
     }
 
+    @MainActor private static func click(_ panel: NSPanel, at location: NSPoint) throws {
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            guard let event = NSEvent.mouseEvent(with: type, location: location, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: panel.windowNumber,
+                context: nil, eventNumber: 1, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0) else {
+                throw CocoaError(.validationMissingMandatoryProperty)
+            }
+            panel.sendEvent(event)
+        }
+    }
+
     @MainActor private static func descendants(of view: NSView) -> [NSView] {
         view.subviews + view.subviews.flatMap { descendants(of: $0) }
     }
@@ -248,9 +269,13 @@ enum CaptionInteractionBenchmark {
         if state == "error" { throw SummaryError.modelUnavailable }
     }
     func summarize(_ text: String, previous: String, onUpdate: @escaping @MainActor (String) -> Void) async throws -> String {
-        let outline = #"{"topic":"new:1","kind":"advertisement","title":"片头赞助与优惠信息","branch":"优惠","text":"片头介绍赞助商及听众优惠。","sources":[1]}"# + "\n"
-            + #"{"topic":"new:2","kind":"discussion","title":"直播的目标","branch":"要点","text":"这场对话先介绍团队与直播目标：通过具体例子，说明 AI 如何减少重复工作，让人把时间留给更有价值的任务。","sources":[1]}"# + "\n"
-            + #"{"topic":"new:3","kind":"discussion","title":"AI 如何融入日常工作","branch":"要点","text":"讨论转向实际使用方式。先识别每天重复的环节，再判断哪些步骤适合交给 AI，避免为了使用工具而增加工作。","sources":[1]}"#
+        let outline = #"{"topic":"new:1","kind":"advertisement","title":"片头赞助与优惠","branch":"听众优惠","text":"片头介绍赞助商与优惠","sources":[1]}"# + "\n"
+            + #"{"topic":"new:2","kind":"discussion","title":"编程 AI 的成功条件","branch":"训练数据","text":"足量代码数据是训练前提","detail":"发言者认为，仅少数组织拥有足量代码训练数据。","sources":[1]}"# + "\n"
+            + #"{"topic":"new:2","kind":"discussion","title":"编程 AI 的成功条件","branch":"训练数据","text":"少数机构掌握足量数据","detail":"提到 Anthropic、OpenAI、Cursor；Google 可能也具备，尚非确定判断。","sources":[1]}"# + "\n"
+            + #"{"topic":"new:2","kind":"discussion","title":"编程 AI 的成功条件","branch":"能力门槛","text":"不会编程，AI 的实用性受限","sources":[1]}"# + "\n"
+            + #"{"topic":"new:2","kind":"discussion","title":"编程 AI 的成功条件","branch":"商业条件","text":"人才与算力共同支撑产品","sources":[1]}"# + "\n"
+            + #"{"topic":"new:2","kind":"discussion","title":"编程 AI 的成功条件","branch":"商业条件","text":"销售团队与客户关系帮助落地","detail":"发言者还强调企业销售团队，以及与众多公司的关系。","sources":[1]}"#
+
 
         if state == "streaming" {
             onUpdate(outline)

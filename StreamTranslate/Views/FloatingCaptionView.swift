@@ -163,9 +163,9 @@ struct FloatingCaptionView: View {
 
     // THESIS: subtitles retain a real reading column; the outline supports them.
     // WORLD: native dark reading surfaces, SF type, one blue translation accent.
-    // PATH: read captions, open the outline, inspect a topic, return to listening.
+    // PATH: scan topic → named branches → short nodes; expand explanations on demand.
     // FIRST VIEWPORT: shared quiet toolbar; wide split, compact content switch.
-    // FORM: scoped native layout refinement; no identity or inference replacement.
+    // FORM: native tree diagram with real sibling edges; repeated meanings reuse nodes, captions keep their own column.
     // FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md
     var body: some View {
         GeometryReader { geometry in
@@ -206,7 +206,7 @@ struct FloatingCaptionView: View {
                                 sidebarWidth = min(440, max(300, (dividerStart ?? sidebarWidth) - value.translation.width))
                             }.onEnded { _ in dividerStart = nil })
                             .help("拖动分隔线以调整两栏宽度")
-                            .accessibilityLabel("调整字幕和脉络的宽度")
+                            .accessibilityLabel("调整字幕和脑图的宽度")
                             .accessibilityAdjustableAction { direction in
                                 sidebarWidth = min(440, max(300, sidebarWidth + (direction == .increment ? 20 : -20)))
                             }
@@ -239,7 +239,7 @@ struct FloatingCaptionView: View {
             if compact {
                 Picker("阅读内容", selection: $compactPage) {
                     Text("字幕").tag("captions")
-                    Text("脉络").tag("summary")
+                    Text("脑图").tag("summary")
                 }
                 .pickerStyle(.segmented).labelsHidden().frame(width: 156)
             } else {
@@ -259,7 +259,7 @@ struct FloatingCaptionView: View {
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "sidebar.right")
-                    if !compact { Text(viewModel.conversationSummary.isExpanded ? "收起脉络" : "对话脉络") }
+                    if !compact { Text(viewModel.conversationSummary.isExpanded ? "收起脑图" : "对话脑图") }
                 }
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(viewModel.conversationSummary.isExpanded ? CaptionWorkspaceStyle.accent : CaptionWorkspaceStyle.secondary)
@@ -267,7 +267,7 @@ struct FloatingCaptionView: View {
                 .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 6))
             }
             .buttonStyle(.plain).focused($summaryButtonFocused)
-            .accessibilityLabel(viewModel.conversationSummary.isExpanded ? "收起对话脉络" : "展开对话脉络")
+            .accessibilityLabel(viewModel.conversationSummary.isExpanded ? "收起对话脑图" : "展开对话脑图")
             .keyboardShortcut("s", modifiers: [.command, .shift])
         }
         .padding(.horizontal, 14).frame(height: 38)

@@ -18,17 +18,18 @@ StreamTranslate shows live English↔Chinese subtitles over other Mac apps. It c
 
 [View subtitle appearance settings](docs/screenshots/subtitle-appearance-1.6.0.png).
 
-## Latest update · 1.9.0
+## Latest update · 1.9.1
 
-- **对话脉络** opens a reading pane beside the subtitles in wide windows. Compact windows switch between **字幕 / 脉络**. Subtitles are never covered by the outline, and both have independent scrolling. Drag the divider to adjust column widths.
+- **对话脑图** shows a connected tree: **topic → named branches → short nodes**. Nodes contain at most 40 characters; explanations expand on demand. Short panes initially show the branch overview, with explicit controls to reveal nodes.
+- The mind map opens beside the subtitles in wide windows. Compact windows switch between **字幕 / 脑图**. Subtitles are never covered, and both panes have independent scrolling. Drag the divider to adjust column widths.
 - Independent topics retain stable identity. The current subject opens, earlier topics collapse, and advertisements remain in a separate folded group. Branches show at most three facts until expanded; copying includes the complete outline.
-- New content adds points to its topic; new roots stay separate even when their titles match, and returning subjects can extend earlier topics. Existing titles and tree order stay fixed. Source corrections replace only dependent points.
+- Related existing nodes are included in a bounded comparison index. The model can identify a repeated meaning with a node reference; the application merges its sources without adding, rewriting or moving the node. New qualifiers and corrections remain separate additions. Existing titles and tree order stay fixed; source corrections replace only dependent points. Semantic duplicate detection can still be wrong or miss older nodes.
 - While expanded, the summary updates automatically from the current session's complete saved original text, including captions beyond the 100-row live cache. First expansion starts immediately; later changes accumulate for about 30 seconds. The model targets 1–3 coherent additions from related records, and completed updates appear together rather than node by node. **整理一次** runs an update on demand.
 - **暂停**, **继续** and **重试** control automatic updates. With private API configuration, summaries use the cloud first and automatically fall back to the existing local Qwen3-4B-Instruct-2507 on failure. A successful cloud request never loads the local summary model. The header identifies the active mode. Without API configuration, summaries remain local.
-- Cloud summaries send new source-text batches and topic labels to the configured provider; audio, recognition, source review and translation retain their existing local paths. Credentials stay in ignored `.env` files outside the app bundle. See [summary API configuration and fallback](docs/cloud-summary-1.8.0.md).
+- Cloud summaries send new source-text batches plus bounded topic/branch labels, selected old short nodes and brief explanatory notes for comparison; audio, recognition, source review and translation retain their existing local paths. Credentials stay in ignored `.env` files outside the app bundle. See [summary API configuration and fallback](docs/cloud-summary-1.8.0.md).
 - AI topic classification and wording can be wrong; check the original captions. At 300 topics or 6,000 facts, additions pause before exceeding the limit and retain the previous completed map; the full transcript stays available.
 
-See [caption workspace behavior and verification](docs/caption-workspace-1.9.0.md), [cloud summary configuration](docs/cloud-summary-1.8.0.md) and [local summary installation](docs/conversation-summary-1.7.0.md).
+See [mind map behavior and verification](docs/mindmap-1.9.1.md), [caption workspace layout](docs/caption-workspace-1.9.0.md), [cloud summary configuration](docs/cloud-summary-1.8.0.md) and [local summary installation](docs/conversation-summary-1.7.0.md).
 Saved text history was introduced in 1.6.1; older diagnostic sessions are not imported. See
 [long-session history and verification limits](docs/long-session-history-1.6.1.md),
 [settings redesign](docs/settings-redesign-1.6.0.md),

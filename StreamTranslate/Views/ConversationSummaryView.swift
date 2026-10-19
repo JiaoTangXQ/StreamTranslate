@@ -5,13 +5,14 @@ import SwiftUI
 struct ConversationSummaryView: View {
     @Environment(CaptionViewModel.self) private var viewModel
     @State private var copied = false
+    @State private var viewportHeight: CGFloat = 0
     private var summary: ConversationSummaryModel { viewModel.conversationSummary }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .center, spacing: 8) {
                 VStack(alignment: .leading, spacing: 5) {
-                    Text("对话脉络").font(.system(size: 15, weight: .semibold))
+                    Text("对话脑图").font(.system(size: 15, weight: .semibold))
                     HStack(spacing: 5) {
                         Text("\(summary.map.topics.filter { $0.kind == .discussion }.count) 个话题")
                         Text("·")
@@ -20,7 +21,7 @@ struct ConversationSummaryView: View {
                     .font(.system(size: 11)).foregroundStyle(CaptionWorkspaceStyle.secondary)
                 }
                 Spacer(minLength: 0)
-                CaptionToolbarButton(title: copied ? "已复制" : "复制完整脉络", symbol: copied ? "checkmark" : "doc.on.doc") {
+                CaptionToolbarButton(title: copied ? "已复制" : "复制完整脑图", symbol: copied ? "checkmark" : "doc.on.doc") {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(summary.map.outline, forType: .string)
                     copied = true
@@ -30,12 +31,12 @@ struct ConversationSummaryView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     if summary.map.hasContent {
-                        ConversationMindMapView(map: summary.map)
+                        ConversationMindMapView(map: summary.map, overviewOnly: viewportHeight < 300)
                     } else {
                         VStack(alignment: .leading, spacing: 9) {
-                            Text(summary.isGenerating ? "正在梳理这段对话" : "先听一段，再看脉络")
+                            Text(summary.isGenerating ? "正在梳理主题与分支" : "先听一段，再看脑图")
                                 .font(.system(size: 15, weight: .medium))
-                            Text("把相关内容合在一起，只保留观点、结论和新的进展。完整字幕可在历史记录中查看。")
+                            Text("展开分支看短节点，点击节点看说明；完整字幕在历史记录中。")
                                 .font(.system(size: 13)).lineSpacing(5)
                                 .foregroundStyle(CaptionWorkspaceStyle.secondary)
                         }
@@ -46,6 +47,7 @@ struct ConversationSummaryView: View {
                 .padding(.horizontal, 20).padding(.bottom, 18)
             }
             .scrollIndicators(.automatic)
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { viewportHeight = $0 }
             Rectangle().fill(CaptionWorkspaceStyle.line).frame(height: 1)
             statusBar
         }

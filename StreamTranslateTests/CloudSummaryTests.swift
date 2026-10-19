@@ -113,21 +113,34 @@ private final class SummaryWireRequests: @unchecked Sendable {
     static let shared = SummaryWireRequests()
     private let lock = NSLock()
     private var requests: [String: URLRequest] = [:]
-    func put(_ request: URLRequest) { lock.withLock { requests[request.url!.host!] = request } }
+    private var counts: [String: Int] = [:]
+    @discardableResult func put(_ request: URLRequest) -> Int {
+        lock.withLock {
+            let host = request.url!.host!
+            requests[host] = request; counts[host, default: 0] += 1
+            return counts[host]!
+        }
+    }
     func get(_ host: String) -> URLRequest? { lock.withLock { requests[host] } }
+    func count(_ host: String) -> Int { lock.withLock { counts[host, default: 0] } }
 }
 
 private final class SummaryWireURLProtocol: URLProtocol, @unchecked Sendable {
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
-        SummaryWireRequests.shared.put(request)
+        let number = SummaryWireRequests.shared.put(request)
         let status = request.url!.host!.hasPrefix("unauthorized") ? 401 : 200
         let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: "HTTP/1.1",
                                        headerFields: ["Content-Type": "text/event-stream"])!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         if status == 200 {
-            let patch = #"{"additions":[{"topic":"new:1","kind":"discussion","title":"测试","branch":"要点","text":"中文事实。","sources":[1]}]}"#
+            let patch: String
+            if request.url!.host!.hasPrefix("dedup-") {
+                patch = number == 1 ? #"{"additions":[{"topic":"T1","kind":"discussion","title":"编程AI","branch":"B1","text":"缺少代码数据就无法训练","detail":"","match":"","sources":[1]}]}"# : #"{"duplicates":[{"index":1,"match":"P1"}]}"#
+            } else {
+                patch = #"{"additions":[{"topic":"new:1","kind":"discussion","title":"测试","branch":"要点","text":"中文事实。","sources":[1]}]}"#
+            }
             let frames: [[String: Any]] = [
                 ["choices": [["delta": ["content": patch], "finish_reason": NSNull()]]],
                 ["choices": [["delta": [:], "finish_reason": "stop"]]]
@@ -144,6 +157,37 @@ private final class SummaryWireURLProtocol: URLProtocol, @unchecked Sendable {
         client?.urlProtocolDidFinishLoading(self)
     }
     override func stopLoading() {}
+}
+
+@Test @MainActor func cloudReviewsParaphrasesWithoutRewritingContentOrStartingLocalModel() async throws {
+    var values = cloudValues()
+    let host = "dedup-" + UUID().uuidString.lowercased() + ".example"
+    values["OPENAI_BASE_URL"] = "https://" + host + "/v1"
+    let settings = URLSessionConfiguration.ephemeral
+    settings.protocolClasses = [SummaryWireURLProtocol.self]
+    let service = CloudSummaryService(configuration: SummaryCloudConfiguration(values: values)!, session: URLSession(configuration: settings))
+    defer { service.cancel() }
+    let batch = SummaryBatch(records: [.init(sourceID: UUID(), text: "Coding AI needs code data.\n")])
+    let map = try ConversationMindMap().adding(#"{"topic":"new:1","kind":"discussion","title":"编程AI","branch":"训练数据","text":"足量代码数据是训练前提","sources":[1]}"#, batch: batch)
+    let repeated = SummaryBatch(records: [.init(sourceID: UUID(), text: "Without code data, coding AI cannot be trained.\n")])
+    let output = try await service.summarize(repeated.input, previous: map.context())
+    let next = try map.adding(output, batch: repeated)
+    #expect(SummaryWireRequests.shared.count(host) == 2)
+    #expect(next.topics[0].branches[0].points.count == 1)
+    #expect(next.topics[0].branches[0].points[0].id == map.topics[0].branches[0].points[0].id)
+    #expect(next.topics[0].branches[0].points[0].sources.count == 2)
+    #expect(!service.usesLocalModel)
+}
+
+@Test @MainActor func duplicateReviewCannotRewriteOrReferenceOtherBranches() throws {
+    let output = #"{"additions":[{"topic":"T1","kind":"discussion","branch":"B1","text":"尚未确认的数据量","detail":"","match":"","sources":[1]}]}"#
+    let context = "T1|discussion|编程AI\n B1|训练数据\n  P1|{}\n B2|能力\n  P2|{}"
+    for review in [#"{"duplicates":[{"index":1,"match":"P2"}]}"#, #"{"duplicates":[{"index":2,"match":"P1"}]}"#, #"{"duplicates":[{"index":1,"match":"P1","text":"擅自改写"}]}"#, #"{"duplicates":[{"index":1,"match":"P1"},{"index":1,"match":"P1"}]}"#] {
+        #expect(throws: SummaryError.self) { try CloudSummaryService.applyingDuplicateReview(review, to: output, previous: context) }
+    }
+    let retained = try CloudSummaryService.applyingDuplicateReview(#"{"duplicates":[]}"#, to: output, previous: context)
+    #expect(retained.contains("尚未确认的数据量"))
+    #expect(try CloudSummaryService.duplicateReviewMessages(output, source: "new", previous: "T1|discussion|编程AI") == nil)
 }
 
 @Test @MainActor func cloudSummaryHTTPUsesConfiguredEndpointAndDecodesSplitUnicodeSSE() async throws {

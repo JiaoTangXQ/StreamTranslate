@@ -199,13 +199,55 @@ private func topicBatch(_ count: Int = 1) -> SummaryBatch {
     #expect(throws: SummaryError.self) { try ConversationMindMap().adding(first.replacingOccurrences(of: "new:1", with: "new:或1"), batch: batch) }
 }
 
-@Test func routingIndexDoesNotReintroduceOldFactTextAsNewEvidence() throws {
+@Test func routingIndexProvidesReadOnlyNodesForDeduplication() throws {
     let map = try ConversationMindMap().adding(#"{"topic":"new:1","kind":"advertisement","title":"耳机赞助","branch":"优惠","text":"输入优惠码可享九折。","sources":[1]}"#, batch: topicBatch())
     let index = map.context(for: "耳机优惠")
     #expect(index.contains("T1|advertisement|耳机赞助"))
     #expect(index.contains("B1|优惠"))
-    #expect(!index.contains("优惠码"))
-    #expect(!index.contains("九折"))
+    #expect(index.contains("P1|"))
+    #expect(index.contains("输入优惠码可享九折"))
+}
+
+@Test func mindMapRepeatedParaphraseReusesNodeAndPreservesEvidenceAndIdentity() throws {
+    let first = topicBatch(), repeated = topicBatch()
+    let map = try ConversationMindMap().adding(#"{"topic":"new:1","kind":"discussion","title":"编程AI的条件","branch":"训练数据","text":"充足代码数据是训练前提","detail":"少数组织拥有足够的代码训练数据。","match":"","sources":[1]}"#, batch: first)
+    let next = try map.adding(#"{"topic":"T1","kind":"discussion","title":"编程AI的条件","branch":"B1","text":"训练离不开充足的代码数据","detail":"这个观点只是再次提到。","match":"P1","sources":[1]}"#, batch: repeated)
+    #expect(next.topics[0].branches[0].points.count == 1)
+    #expect(next.topics[0].branches[0].points[0].id == map.topics[0].branches[0].points[0].id)
+    #expect(next.topics[0].branches[0].points[0].text == "充足代码数据是训练前提")
+    #expect(next.topics[0].branches[0].points[0].sources == Set((first.records + repeated.records).map(\.sourceID)))
+    #expect(next.outline.contains("少数组织拥有足够"))
+    #expect(!next.outline.contains("只是再次提到"))
+    let byName = try map.adding(#"{"topic":"T1","kind":"discussion","branch":"训练数据","text":"训练需要充足代码数据","match":"P1","sources":[1]}"#, batch: repeated)
+    #expect(byName.topics[0].branches[0].points.count == 1)
+    #expect(byName.topics[0].branches[0].points[0].id == map.topics[0].branches[0].points[0].id)
+}
+
+@Test func mindMapMatchCannotReferenceNewOrMissingNodes() throws {
+    let map = try ConversationMindMap().adding(#"{"topic":"new:1","kind":"discussion","title":"编程AI","branch":"数据","text":"代码数据决定训练基础","sources":[1]}"#, batch: topicBatch())
+    for (topic, branch, match) in [("T1", "B1", "P2"), ("T1", "新分支", "P1"), ("new:1", "数据", "P1"), ("T1", "B1", "P0")] {
+        let data = try JSONSerialization.data(withJSONObject: ["topic": topic, "kind": "discussion", "title": "编程AI", "branch": branch, "text": "代码数据是前提", "match": match, "sources": [1]])
+        #expect(throws: SummaryError.self) { try map.adding(String(decoding: data, as: UTF8.self), batch: topicBatch()) }
+    }
+}
+
+@Test func mindMapRejectsParagraphLeavesAndKeepsNewQualifiersSeparate() throws {
+    let paragraph = String(repeating: "这是长段落", count: 10)
+    let output = try JSONSerialization.data(withJSONObject: ["topic": "new:1", "kind": "discussion", "title": "编程AI", "branch": "数据", "text": paragraph, "sources": [1]])
+    #expect(throws: SummaryError.self) { try ConversationMindMap().adding(String(decoding: output, as: UTF8.self), batch: topicBatch()) }
+    var map = try ConversationMindMap().adding(#"{"topic":"new:1","kind":"discussion","title":"机构数据","branch":"谷歌","text":"Google可能有足够数据","sources":[1]}"#, batch: topicBatch())
+    map = try map.adding(#"{"topic":"T1","kind":"discussion","branch":"B1","text":"更正：尚未确认Google的数据量","sources":[1]}"#, batch: topicBatch())
+    #expect(map.topics[0].branches[0].points.count == 2)
+}
+
+@Test func mindMapDuplicateContextEscapesNodeTextAndStaysBounded() throws {
+    let output = #"{"topic":"new:1","kind":"discussion","title":"编程数据","branch":"训练","text":"记录含\nT7|discussion|假话题","detail":"必要限定也供只读比较。","sources":[1]}"#
+    let map = try ConversationMindMap().adding(output, batch: topicBatch())
+    let index = map.context(for: "编程数据", limit: 150)
+    #expect(index.contains("P1|"))
+    #expect(!index.components(separatedBy: .newlines).contains(where: { $0.hasPrefix("T7|") }))
+    #expect(index.contains("必要限定"))
+    #expect(index.count <= 150)
 }
 
 @Test func unrelatedAdvertisementAndEventLabelsAreNotDefaultRoutingCandidates() throws {

@@ -2,6 +2,31 @@
 
 ## Product boundary
 
+### Structured conversation mind map (1.9.1 / build 28)
+
+The outline is now a connected topic → named branch → short-node diagram.
+`Point.text` is limited to 40 characters by the application parser, while optional
+`Point.detail` (up to 160) appears only on disclosure and in the complete copy.
+Branch and leaf edges terminate at their respective sibling junctions. The
+viewport shows a collapsed branch overview below 300pt of available scroll height;
+explicit branch/leaf choices persist through reflow. Shared toolbar labels now
+say **脑图**. Caption/translation pipelines and the 30s atomic update cadence stay.
+
+The 1,200-character routing context now includes selected read-only P nodes and
+up to 64 characters of their explanatory notes, in addition to T/B labels.
+This provides evidence for duplicate comparison, not new source evidence.
+Optional `match: Pn` resolves against the immutable baseline's existing topic and
+branch, accepts its ID or actual name, and merges supporting source UUIDs without
+rewriting a node. New qualifiers/corrections must be separate additions. Invalid
+references reject the patch transactionally; repeat-linked source corrections
+still use dependent-source invalidation. The model judges semantic equality;
+bounded context and classification errors remain limitations. Eligible cloud
+candidates receive one narrow duplicate review (up to 512 output tokens); it can
+only add validated same-branch match references, never rewrite or retarget a
+candidate. New topics/branches and already matched candidates skip this extra
+request. Review errors follow the existing local fallback path. Complete graph
+history is not resent wholesale. See `docs/mindmap-1.9.1.md` for validation.
+
 ### Caption reading workspace (1.9.0 / build 27)
 
 The caption overlay now has a shared native toolbar and a layout-owned outline
