@@ -18,7 +18,12 @@ import AppKit
         开发者：先在本机按需生成中文总结，有新内容时手动更新；是否持续自动更新暂未确定。
         用户：总结不要说停字幕问题已经解决，也不要捏造我们没有决定的事情。
         """
-        let text = try await service.summarize(input, previous: "")
+        var updates = 0
+        let text = try await service.summarize(input, previous: "") { partial in
+            updates += 1
+            if updates == 1 { print("STREAM FIRST UPDATE seconds=\(Date().timeIntervalSince(start)) chars=\(partial.count)"); fflush(nil) }
+        }
+        print("STREAM UPDATE COUNT=\(updates)")
         print(text)
         print("SUMMARY COMPLETE seconds=\(Date().timeIntervalSince(start))")
         let updated = try await service.summarize("补充讨论：暂时维持手动更新总结。有新字幕时显示更新提示，不持续自动推理。原来的静默停字幕问题仍需继续排查。", previous: text)

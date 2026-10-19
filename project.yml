@@ -69,8 +69,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.jiaotangxq.StreamTranslate
-        MARKETING_VERSION: "1.7.0"
-        CURRENT_PROJECT_VERSION: "22"
+        MARKETING_VERSION: "1.7.1"
+        CURRENT_PROJECT_VERSION: "23"
         SWIFT_VERSION: "6.0"
         SWIFT_OBJC_BRIDGING_HEADER: StreamTranslate/Bridge/StreamTranslate-Bridging-Header.h
         CODE_SIGN_ENTITLEMENTS: StreamTranslate/Resources/StreamTranslate.entitlements

@@ -166,19 +166,23 @@ final class LocalCommand: @unchecked Sendable {
         }
     }
 
-    static func run(arguments: [String], input: Data, timeout: Double) async throws -> Data {
+    static func run(arguments: [String], input: Data, timeout: Double,
+                    maximumResponseBytes: Int = 65_536,
+                    onData: (@Sendable (Data) -> Void)? = nil) async throws -> Data {
         let control = LocalCommand()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 DispatchQueue.global(qos: .userInitiated).async {
-                    do { continuation.resume(returning: try control.execute(arguments: arguments, input: input, timeout: timeout)) }
+                    do { continuation.resume(returning: try control.execute(arguments: arguments, input: input,
+                        timeout: timeout, maximumResponseBytes: maximumResponseBytes, onData: onData)) }
                     catch { control.stop(); continuation.resume(throwing: error) }
                 }
             }
         } onCancel: { control.stop() }
     }
 
-    private func execute(arguments: [String], input: Data, timeout: Double) throws -> Data {
+    private func execute(arguments: [String], input: Data, timeout: Double, maximumResponseBytes: Int,
+                         onData: (@Sendable (Data) -> Void)?) throws -> Data {
         let child = Process(), stdin = Pipe(), stdout = Pipe()
         child.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
         child.arguments = arguments
@@ -206,8 +210,10 @@ final class LocalCommand: @unchecked Sendable {
                     return data
                 }
                 guard count > 0 else { throw LocalReviewError.invalidResponse }
-                data.append(contentsOf: bytes.prefix(count))
-                guard data.count <= 65_536 else { throw LocalReviewError.invalidResponse }
+                let chunk = Data(bytes.prefix(count))
+                data.append(chunk)
+                guard data.count <= maximumResponseBytes else { throw LocalReviewError.invalidResponse }
+                onData?(chunk)
             }
         }
         throw LocalReviewError.timeout

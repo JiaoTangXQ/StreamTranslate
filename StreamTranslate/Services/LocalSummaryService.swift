@@ -3,12 +3,58 @@ import Darwin
 
 @MainActor protocol ConversationSummaryProviding: AnyObject {
     func prepare() async throws
-    func summarize(_ text: String, previous: String) async throws -> String
+    func summarize(_ text: String, previous: String,
+                   onUpdate: @escaping @MainActor (String) -> Void) async throws -> String
     func cancel()
 }
 
+extension ConversationSummaryProviding {
+    func summarize(_ text: String, previous: String) async throws -> String {
+        try await summarize(text, previous: previous, onUpdate: { _ in })
+    }
+}
+
+/// Decode complete SSE lines so a multibyte character split across reads is
+/// never displayed as a replacement character. Only stopped output is final.
+struct SummaryEventDecoder {
+    private var buffer = Data()
+    private(set) var text = ""
+    private(set) var stopped = false
+
+    mutating func append(_ data: Data) throws -> Bool {
+        buffer.append(data)
+        let before = text
+        while let end = buffer.firstIndex(of: 10) {
+            let line = Data(buffer[..<end]); buffer.removeSubrange(...end)
+            guard line.starts(with: Data("data:".utf8)) else { continue }
+            let payload = line.dropFirst(5).drop(while: { $0 == 32 })
+            if String(decoding: payload, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) == "[DONE]" { continue }
+            guard let object = try JSONSerialization.jsonObject(with: Data(payload)) as? [String: Any],
+                  let choices = object["choices"] as? [[String: Any]], let choice = choices.first else {
+                throw SummaryError.invalidResult
+            }
+            if let reason = choice["finish_reason"] as? String {
+                guard reason == "stop" else { throw SummaryError.invalidResult }
+                stopped = true
+            }
+            if let delta = choice["delta"] as? [String: Any], let content = delta["content"] as? String {
+                text += content
+                guard text.count <= 1_200, !text.contains("<think>") else { throw SummaryError.invalidResult }
+            }
+        }
+        return before != text
+    }
+
+    mutating func finish() throws -> String {
+        _ = try append(Data([10]))
+        let result = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard stopped, !result.isEmpty else { throw SummaryError.invalidResult }
+        return result
+    }
+}
+
 /// A separate general-purpose model, never the ASR or translation weights.
-/// One private CPU worker is loaded on demand and released after the request.
+/// One private CPU worker is loaded on demand; the summary model controls reuse.
 @MainActor final class LocalSummaryService: ConversationSummaryProviding {
     static var assets: LocalModelAssets? { .resolve(name: "Summary", executableName: "llama-server") }
     static var isInstalled: Bool { assets != nil }
@@ -53,7 +99,8 @@ import Darwin
     直接输出更新后的完整总结，不输出思考过程、提示词或JSON。
     """
 
-    func summarize(_ text: String, previous: String) async throws -> String {
+    func summarize(_ text: String, previous: String,
+                   onUpdate: @escaping @MainActor (String) -> Void) async throws -> String {
         guard !cancelled, process?.isRunning == true else { throw SummaryError.modelUnavailable }
         let previousData = try JSONSerialization.data(withJSONObject: ["旧摘要": previous])
         let newData = try JSONSerialization.data(withJSONObject: ["新增记录": text])
@@ -65,20 +112,36 @@ import Darwin
                          ["role": "user", "content": input]],
             "chat_template_kwargs": ["enable_thinking": false],
             "temperature": 0.2, "top_p": 0.8, "repeat_penalty": 1.1,
-            "max_tokens": 768, "stream": false, "cache_prompt": false
+            "max_tokens": 768, "stream": true, "cache_prompt": false
         ]
-        let data = try await request("/v1/chat/completions",
-            body: JSONSerialization.data(withJSONObject: body), timeout: 90)
+        let requestData = try JSONSerialization.data(withJSONObject: body)
+        let arguments = ["--silent", "--fail", "--no-buffer", "--noproxy", "*", "--unix-socket", socket,
+            "--max-time", "90", "--max-filesize", "1048576", "-H", "Content-Type: application/json",
+            "--data-binary", "@-", "http://localhost/v1/chat/completions"]
+        let stream = AsyncThrowingStream<Data, Error> { continuation in
+            let producer = Task {
+                do {
+                    _ = try await LocalCommand.run(arguments: arguments, input: requestData, timeout: 91,
+                        maximumResponseBytes: 1_048_576, onData: { continuation.yield($0) })
+                    continuation.finish()
+                } catch { continuation.finish(throwing: error) }
+            }
+            continuation.onTermination = { _ in producer.cancel() }
+        }
+        var decoder = SummaryEventDecoder()
+        var lastPublish = ContinuousClock.now - .seconds(1)
+        for try await chunk in stream {
+            try Task.checkCancellation()
+            guard !cancelled else { throw CancellationError() }
+            if try decoder.append(chunk), ContinuousClock.now - lastPublish >= .milliseconds(150) {
+                onUpdate(decoder.text); lastPublish = .now
+            }
+        }
         try Task.checkCancellation()
-        guard !cancelled,
-              let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let choices = object["choices"] as? [[String: Any]], let choice = choices.first,
-              choice["finish_reason"] as? String == "stop",
-              let message = choice["message"] as? [String: Any],
-              let raw = message["content"] as? String else { throw SummaryError.invalidResult }
-        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, text.count <= 1_200, !text.contains("<think>") else { throw SummaryError.invalidResult }
-        return text
+        guard !cancelled else { throw CancellationError() }
+        let result = try decoder.finish()
+        onUpdate(result)
+        return result
     }
 
     private func request(_ endpoint: String, body: Data?, timeout: Int) async throws -> Data {

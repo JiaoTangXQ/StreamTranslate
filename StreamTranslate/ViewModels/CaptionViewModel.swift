@@ -424,18 +424,33 @@ final class CaptionViewModel {
         companionSessionStartedAt = .now
     }
 
-    func requestConversationSummary() {
+    func expandConversationSummary() {
+        conversationSummary.isExpanded = true
+        resumeConversationSummary()
+    }
+
+    func resumeConversationSummary() {
+        conversationSummary.resumeAutomaticUpdates()
+        requestConversationSummary(automatically: true, immediately: true)
+    }
+
+    func requestConversationSummary(automatically: Bool = false, immediately: Bool = false) {
+        if automatically && (!conversationSummary.isExpanded || !conversationSummary.isAutoUpdating) { return }
         let sessionID = companionSessionID
         let startedAt = companionSessionStartedAt
         let store = historyStore
         let fallback = captionHistory.filter { $0.timestamp >= startedAt }
-        conversationSummary.generate(sourceRevision: conversationSourceRevision) {
+        let load: @MainActor () async throws -> [CaptionEntry] = {
             if let store {
                 guard store.errorMessage == nil else { throw SummaryError.historyUnavailable }
                 return try await store.captions(in: sessionID)
             }
             return fallback
         }
+        if automatically {
+            conversationSummary.scheduleAutomaticUpdate(sourceRevision: conversationSourceRevision,
+                immediately: immediately, load: load)
+        } else { conversationSummary.generate(sourceRevision: conversationSourceRevision, load: load) }
     }
 
     func clearHistory() {
@@ -1942,6 +1957,7 @@ final class CaptionViewModel {
             recentCaptions.removeFirst()
         }
         scheduleCleanup()
+        if entry.timestamp >= companionSessionStartedAt { requestConversationSummary(automatically: true) }
     }
 
     private func updateCaption(
@@ -1958,7 +1974,8 @@ final class CaptionViewModel {
             chineseText: chinese,
             sourceLanguage: sourceLanguage
         )
-        if updated.originalText != previous.originalText, updated.timestamp >= companionSessionStartedAt {
+        let sourceChanged = updated.originalText != previous.originalText && updated.timestamp >= companionSessionStartedAt
+        if sourceChanged {
             conversationSourceRevision &+= 1
         }
         if let historyIndex = captionHistory.firstIndex(where: { $0.id == id }) {
@@ -1973,6 +1990,7 @@ final class CaptionViewModel {
         if let recentIndex = recentCaptions.firstIndex(where: { $0.id == id }) {
             recentCaptions[recentIndex] = updated
         }
+        if sourceChanged { requestConversationSummary(automatically: true) }
     }
 
     private func captionForUpdate(_ id: UUID) -> CaptionEntry? {

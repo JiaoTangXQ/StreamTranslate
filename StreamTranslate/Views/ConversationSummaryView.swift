@@ -7,10 +7,7 @@ struct ConversationSummaryView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var summary: ConversationSummaryModel { viewModel.conversationSummary }
-    private var hasNewContent: Bool {
-        summary.completedSourceRevision != nil
-            && summary.completedSourceRevision != viewModel.conversationSourceRevision
-    }
+    private var displayedText: String { summary.draftText.isEmpty ? summary.text : summary.draftText }
 
     var body: some View {
         GeometryReader { geometry in
@@ -25,8 +22,7 @@ struct ConversationSummaryView: View {
                     .transition(.move(edge: .trailing).combined(with: .opacity))
             } else {
                 Button {
-                    summary.isExpanded = true
-                    if summary.text.isEmpty { viewModel.requestConversationSummary() }
+                    viewModel.expandConversationSummary()
                 } label: {
                     VStack(spacing: 5) {
                         Image(systemName: "text.alignleft")
@@ -72,10 +68,10 @@ struct ConversationSummaryView: View {
             Divider().overlay(.white.opacity(0.15))
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    if !summary.text.isEmpty {
-                        Text(summary.text).font(.system(size: 13))
+                    if !displayedText.isEmpty {
+                        Text(displayedText).font(.system(size: 13))
                             .lineSpacing(5).textSelection(.enabled)
-                        if let date = summary.completedAt {
+                        if !summary.isGenerating, let date = summary.completedAt {
                             HStack(spacing: 4) {
                                 Text("已梳理 \(summary.coveredCount) 条 ·")
                                 Text(date, format: .dateTime.hour().minute())
@@ -85,7 +81,7 @@ struct ConversationSummaryView: View {
                     } else if !summary.isGenerating && summary.errorMessage == nil {
                         Text("先听几句话，再来看大意。")
                             .font(.system(size: 14, weight: .medium))
-                        Text("总结本次开始以来的完整记录，概括主题、讨论进展和未定事项。")
+                        Text("新字幕出现后会自动总结，概括本次对话的主题与主要内容。")
                             .font(.system(size: 12)).foregroundStyle(.white.opacity(0.7))
                     }
                     if summary.isGenerating {
@@ -111,16 +107,16 @@ struct ConversationSummaryView: View {
             }
             Divider().overlay(.white.opacity(0.15))
             HStack(spacing: 8) {
-                if summary.isGenerating {
-                    Button("取消") { summary.cancel() }
+                if summary.errorMessage != nil {
+                    Button("重试") { viewModel.resumeConversationSummary() }
+                } else if summary.isAutoUpdating {
+                    Button("暂停") { summary.pauseAutomaticUpdates() }
                 } else {
-                    Button(summary.errorMessage != nil ? "重试" : summary.text.isEmpty ? "生成总结"
-                        : hasNewContent ? "更新总结 · 有新内容" : "已是最新") {
-                        viewModel.requestConversationSummary()
-                    }
-                    .disabled(viewModel.conversationSourceRevision == 0
-                        || (!summary.text.isEmpty && !hasNewContent && summary.errorMessage == nil))
+                    Button("继续") { viewModel.resumeConversationSummary() }
                 }
+                Text(summary.isGenerating ? "更新中" : summary.isUpdateScheduled ? "即将更新"
+                    : summary.isAutoUpdating ? "自动更新" : "已暂停")
+                    .font(.system(size: 10)).foregroundStyle(.white.opacity(0.7))
                 Spacer(minLength: 0)
                 Text("AI 可能有遗漏").font(.system(size: 10)).foregroundStyle(.white.opacity(0.65))
             }

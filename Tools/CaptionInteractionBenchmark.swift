@@ -103,7 +103,7 @@ enum CaptionInteractionBenchmark {
                 }
                 // The panel stays dark even when the surrounding system is Light.
                 panel.appearance = NSAppearance(named: .aqua)
-                for state in ["empty", "loading", "error"] {
+                for state in ["empty", "loading", "streaming", "paused", "error"] {
                     let stateModel = ConversationSummaryModel { SummaryPreviewProvider(state: state) }
                     let stateVM = CaptionViewModel(conversationSummary: stateModel)
                     stateVM.captionHistory = vm.captionHistory
@@ -115,7 +115,21 @@ enum CaptionInteractionBenchmark {
                     if state != "empty" {
                         stateModel.generate(sourceRevision: 0) { Array(vm.captionHistory.suffix(4)) }
                     }
-                    try await Task.sleep(for: .milliseconds(200))
+                    var ready = false
+                    for _ in 0..<200 {
+                        switch state {
+                        case "loading": ready = stateModel.progress == "正在准备本地 AI…"
+                        case "streaming": ready = !stateModel.draftText.isEmpty
+                        case "paused": ready = !stateModel.isGenerating && !stateModel.text.isEmpty
+                        case "error": ready = stateModel.errorMessage != nil
+                        default: ready = true
+                        }
+                        if ready { break }
+                        try await Task.sleep(for: .milliseconds(20))
+                    }
+                    guard ready else { throw CocoaError(.validationMissingMandatoryProperty) }
+                    if state == "paused" { stateModel.pauseAutomaticUpdates() }
+                    try await Task.sleep(for: .milliseconds(100))
                     try screenshot(stateHost, to: output.appendingPathComponent("summary-300-\(state)-light.png"))
                     stateModel.collapse()
                 }
@@ -187,8 +201,12 @@ enum CaptionInteractionBenchmark {
         if state == "loading" { try await Task.sleep(for: .seconds(60)) }
         if state == "error" { throw SummaryError.modelUnavailable }
     }
-    func summarize(_ text: String, previous: String) async throws -> String {
-        "在聊什么\n讨论长时间使用后字幕卡顿，以及如何更容易跟上对话。\n\n讨论进展\n悬浮窗只保留100条字幕，完整记录保存在本机。右侧增加可折叠的中文总结，按需生成。\n\n待确认\n静默停字幕的原因尚未复现，是否自动更新总结也未确定。"
+    func summarize(_ text: String, previous: String, onUpdate: @escaping @MainActor (String) -> Void) async throws -> String {
+        if state == "streaming" {
+            onUpdate("在聊什么\n讨论字幕体验，以及如何更容易跟上对话。\n\n主要内容\n新字幕产生后自动更新总结，生成中的文字逐步显示。")
+            try await Task.sleep(for: .seconds(60))
+        }
+        return "在聊什么\n讨论长时间使用后字幕卡顿，以及如何更容易跟上对话。\n\n主要内容\n悬浮窗只保留100条字幕，完整记录保存在本机。右侧增加可折叠的中文总结，展开时自动更新。静默停字幕的原因仍需排查。"
     }
     func cancel() {}
 }

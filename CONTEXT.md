@@ -2,11 +2,15 @@
 
 ## Product boundary
 
-### On-demand local conversation summary (1.7.0 / build 22)
+### Automatic local conversation summary (1.7.1 / build 23)
 
 `ConversationSummaryView` adds a default-collapsed right-edge tab over the existing
-native dark caption panel. First expansion generates a Chinese topic-and-main-points
-summary; new source content requires manual update. The drawer overlays
+native dark caption panel. First expansion immediately starts a Chinese topic-and-
+main-points summary. While expanded and unpaused, completed original-source changes
+schedule automatic updates after a two-second delay anchored to the first change;
+further changes do not postpone that scheduled update. Busy changes replace one
+latest pending request; no parallel inference or model instance is started. The
+footer exposes pause, continue and retry. The drawer overlays
 captions without changing their layout width. Expanding a panel shorter than 300pt
 temporarily raises its minimum height from 144pt to 300pt; folding restores the
 stored height preference. Preserve this overlay behavior and the incumbent UI.
@@ -21,23 +25,38 @@ are approximate AI output, held in memory only, and are reset on capture-session
 change or clear. They are not summaries of older saved sessions.
 
 `LocalSummaryService` uses a separate Qwen3-4B-Instruct-2507 Q4_K_M model and private Unix socket,
-one request at a time, two utility CPU threads, no GPU. It loads on demand and frees
-the worker after success, failure or cancellation. Fold, minimize, phone-only mode,
-clear, capture-session change, quit and memory pressure cancel pending work;
-generation guards reject late results. Model installation downloads weights, not
+one request at a time, two utility CPU threads, no GPU. Continuous updates reuse
+one worker; after 15 seconds idle it is released even while expanded. New source
+after idle reloads the worker, but an unchanged source does not trigger inference.
+SSE output streams draft text into the drawer. Completed text, source keys and
+coverage metadata commit only after all chunks finish with an explicit stop;
+cancelled, truncated or failed output discards the draft and preserves the prior
+completed summary. Fold, pause, minimize, phone-only mode, clear, capture-session
+change, quit and memory pressure cancel work and release the worker; generation
+guards reject late results. Errors and memory warnings pause automatic updates
+until the user retries, avoiding repeated restarts on every caption. Model
+installation downloads weights, not
 conversation data. `scripts/install-summary-local.sh` pins the LM Studio quantization
 revision and full SHA-256 and copies an available llama.cpp runtime. App execution
 has no Python dependency. Model weights stay out of git.
 
 The local `SystemLanguageModel` probe reported `deviceNotEligible`; this feature
-does not use Apple Foundation Models. Real inference was checked on synthetic fixed text, including appended content that
-replaces an earlier undecided summary with an explicit manual-update decision.
-Final observed preparation/first-generation/update times were 13.4/16.9/16.1s;
-a separate two-request sample peaked at about 3.7 GiB child RSS. These are samples,
-not latency or memory guarantees. Sequential regression passed 333 tests with the
-same eight shared-log/installed-asset exclusions. Final 300pt state previews and
-Release build passed; native mouse/keyboard/VoiceOver and real ASR concurrency
-remain unverified. Read
+does not use Apple Foundation Models. Historical 1.7.0 synthetic-text inference
+observed preparation/first-generation/update times of 13.4/16.9/16.1s and a separate
+two-request sample peaked at about 3.7 GiB child RSS; these are not 1.7.1 measurements
+or guarantees. Current sequential regression passed 339 tests, including 13 summary
+tests, with seven AppLoggerTests and one installed-translation-assets test excluded.
+Release build and strict signature verification passed; 1.7.1/build 23 is installed
+and launched, with 1.7.0 retained at `/Applications/StreamTranslate.app.previous`.
+Single-worker synthetic-text streaming observed preparation/first-visible-text/
+completion at 24.39/33.86/48.32s from probe start, with 71 update callbacks; the
+incremental request took 31.18s (79.50s cumulative). These are single samples.
+An initial probe timed out while an installed-app summary worker was also running;
+the isolated single-worker rerun succeeded and left no worker behind. The sample
+still retained outdated unresolved wording, so semantic consistency is not assured.
+Final 300pt states and 620pt completed preview passed, and independent review found
+no mandatory code changes. Native mouse/keyboard/VoiceOver, actual memory-pressure
+behavior and real ASR concurrency remain unverified. Read
 `docs/conversation-summary-1.7.0.md` for setup, checks and limitations.
 
 ### Bounded live captions and saved history (1.6.1 / build 21)

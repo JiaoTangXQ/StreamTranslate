@@ -18,11 +18,11 @@ StreamTranslate shows live English↔Chinese subtitles over other Mac apps. It c
 
 [View subtitle appearance settings](docs/screenshots/subtitle-appearance-1.6.0.png).
 
-## Latest update · 1.7.0
+## Latest update · 1.7.1
 
 - A collapsed **总结** tab on the floating window's right edge opens a local Chinese AI summary of the current conversation's topic, progress and unresolved questions.
-- Summary input comes from the current session's complete saved original text, including captions beyond the 100-row live cache. Generate on first expansion and update manually when new content arrives.
-- A separate optional Qwen3-4B-Instruct-2507 model runs one request at a time on two CPU threads, with no GPU use. Folding the summary cancels generation and releases its model; conversation text stays on the Mac.
+- While expanded, the summary updates automatically from the current session's complete saved original text, including captions beyond the 100-row live cache. First expansion starts immediately; later changes coalesce for two seconds and draft text appears as it is generated.
+- **暂停**, **继续** and **重试** control automatic updates. A separate optional Qwen3-4B-Instruct-2507 worker uses two CPU threads and no GPU; folding cancels and releases it, and 15 seconds idle also releases it. Conversation text stays on the Mac.
 - The summary overlays the subtitle window without resizing its text width. AI output may omit or misstate details; check the original captions.
 
 See [summary installation, behavior and verification limits](docs/conversation-summary-1.7.0.md).
@@ -50,7 +50,7 @@ Fixed English and Mandarin have Apple's continuous on-device speech transcriber.
 - Microphone and ScreenCaptureKit watchdogs rebuild stalled capture after about three seconds
 - Audio, speech recognition, and translation stay on the Mac
 - Optional Qwen source review and bidirectional Hy-MT final refinement update the same caption; guarded revisions, timeouts and memory-pressure fallback retain the fast system path
-- Optional local conversation summaries use the full current-session original transcript; summaries are generated on demand and are not saved across app relaunches
+- Optional local conversation summaries update automatically while their drawer is expanded, use the full current-session original transcript, and are not saved across app relaunches
 
 The transcription/translation pipeline uses network access to install missing language assets or optional models/runtimes. Enabling phone subtitles also requires a LAN connection or, for the optional remote relay, Internet access. Audio recognition and translation processing remain local.
 
@@ -176,6 +176,8 @@ xcodebuild test \
   -destination 'platform=macOS' \
   CODE_SIGNING_ALLOWED=NO
 ```
+
+For 1.7.1, 339 tests passed sequentially, including 13 summary tests, excluding the same seven shared-log tests and one installed-translation-assets test. Release build, local installation of 1.7.1/build 23 and strict signature verification passed. Synthetic-text inference streamed successfully; known summary misstatements, untested real ASR concurrency and other limits are recorded in [summary verification](docs/conversation-summary-1.7.0.md).
 
 For the 1.6.1 local verification, 326 tests passed with `swift test --no-parallel --skip 'AppLoggerTests|companionInstalledTranslationRunsWithoutAnyWindow'`. The seven shared-log tests were excluded to preserve diagnostic evidence; the installed-assets translation test reported `notInstalled` in the test process. See [verification limits](docs/long-session-history-1.6.1.md).
 
