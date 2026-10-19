@@ -18,13 +18,13 @@ StreamTranslate shows live English↔Chinese subtitles over other Mac apps. It c
 
 [View subtitle appearance settings](docs/screenshots/subtitle-appearance-1.6.0.png).
 
-## Latest update · 1.7.2
+## Latest update · 1.7.3
 
-- The collapsed **总结** tab opens a connected Chinese mind map: a central topic, topic branches and concise points. Click branches to expand or fold them, or copy the text outline.
+- The collapsed **总结** tab opens independent topic trees. Advertisements, discussion and uncertain content have separate roots; advertisements start as compact folded rows. Click topics or branches to expand them, or copy the outline.
+- New content adds points to its topic; new roots stay separate even when their titles match, and returning subjects can extend earlier topics. Existing titles and tree order stay fixed. Source corrections replace only dependent points.
 - While expanded, the summary updates automatically from the current session's complete saved original text, including captions beyond the 100-row live cache. First expansion starts immediately; later changes coalesce for two seconds and draft text appears as it is generated.
 - **暂停**, **继续** and **重试** control automatic updates. A separate optional Qwen3-4B-Instruct-2507 worker uses two CPU threads and no GPU; folding cancels and releases it, and 15 seconds idle also releases it. Conversation text stays on the Mac.
-- The summary overlays the subtitle window without resizing its text width. AI output may omit or misstate details; check the original captions.
-- Model startup now shows elapsed time and distinguishes launch errors, worker exit codes and a 90-second startup budget. The reported startup failure's exact cause remains unconfirmed; model, preview, Release build and local installation checks passed for 1.7.2.
+- The summary overlays the subtitle window without resizing its text width. AI topic classification and wording can be wrong; check the original captions. At 300 topics or 6,000 facts, additions pause before exceeding the limit and retain the previous completed map; the full transcript stays available.
 
 See [summary installation, behavior and verification limits](docs/conversation-summary-1.7.0.md).
 Saved text history was introduced in 1.6.1; older diagnostic sessions are not imported. See
@@ -178,7 +178,9 @@ xcodebuild test \
   CODE_SIGNING_ALLOWED=NO
 ```
 
-For 1.7.2, 346 sequential tests passed, including 20 summary-focused tests, excluding seven shared-log tests and one installed-translation-assets test. Synthetic-text model inference, 300/620pt previews, Release build, local installation of 1.7.2/build 24 and strict signature verification passed. The model still produced unsupported wording, and real ASR concurrency remains unverified. See [verification and limits](docs/conversation-summary-1.7.0.md).
+For 1.7.3, 360 sequential tests passed, including 34 summary-focused tests, excluding seven shared-log tests and one installed-translation fixture. Nine summary previews, a five-stage production-model replay, Release build, local installation of 1.7.3/build 25 and strict signature verification passed. The synthetic replay does not establish general classification accuracy or real ASR concurrency. See [verification and limits](docs/conversation-summary-1.7.0.md).
+
+Historical 1.7.2 verification: 346 sequential tests passed, including 20 summary-focused tests, excluding seven shared-log tests and one installed-translation-assets test. Synthetic-text model inference, 300/620pt previews, Release build, local installation of 1.7.2/build 24 and strict signature verification passed. The model still produced unsupported wording, and real ASR concurrency remains unverified.
 
 Historical 1.7.1 verification: 339 tests passed sequentially, including 13 summary tests, excluding the same seven shared-log tests and one installed-translation-assets test. Release build, local installation of 1.7.1/build 23 and strict signature verification passed. Synthetic-text inference streamed successfully; known summary misstatements and untested real ASR concurrency remain documented.
 

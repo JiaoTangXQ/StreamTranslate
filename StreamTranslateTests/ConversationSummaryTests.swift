@@ -15,11 +15,12 @@ import Testing
         requests.append((text, previous))
         activeRequests += 1; maximumActiveRequests = max(maximumActiveRequests, activeRequests)
         defer { activeRequests -= 1 }
-        onUpdate("在聊什么\n正在生成的草稿")
+        let response = #"{"topic":"new:1","kind":"discussion","title":"软件使用","branch":"字幕","text":"保留100条，完整记录本地保存。","sources":[1]}"#
+        onUpdate(response)
         if delay > .zero { try? await Task.sleep(for: delay) }
-        onUpdate("在聊什么\n迟到或完成的草稿")
+        onUpdate(response)
         if fails { throw SummaryError.invalidResult }
-        return "在聊什么\n讨论窗口卡顿。\n讨论进展\n保留100条，完整记录本地保存。\n待确认\n停字幕原因仍未复现。"
+        return response
     }
     func cancel() { cancelled = true }
 }
@@ -27,6 +28,219 @@ import Testing
 private func summaryEntries(_ count: Int) -> [CaptionEntry] {
     (0..<count).map { CaptionEntry(timestamp: .now,
         englishText: "Topic \($0): discuss the meeting and keep the full record.", chineseText: "") }
+}
+
+@MainActor private final class SummaryPatchStub: ConversationSummaryProviding {
+    var responses: [String]
+    var inputs: [String] = []
+    init(_ responses: [String]) { self.responses = responses }
+    func prepare() async throws {}
+    func cancel() {}
+    func summarize(_ text: String, previous: String, onUpdate: @escaping @MainActor (String) -> Void) async throws -> String {
+        inputs.append(text)
+        let result = responses.removeFirst()
+        onUpdate(result)
+        return result
+    }
+}
+
+@Test @MainActor func summaryAppendsIndependentSubjectsWithoutReplacingEarlierText() async {
+    let engine = SummaryPatchStub([
+        #"{"topic":"new:1","kind":"advertisement","title":"耳机赞助","branch":"优惠","text":"使用优惠码可享折扣。","sources":[1]}"#,
+        #"{"topic":"new:1","kind":"discussion","title":"记忆形成","branch":"机制","text":"海马体参与记忆形成。","sources":[1]}"#
+    ])
+    let model = ConversationSummaryModel { engine }
+    var entries = [CaptionEntry(timestamp: .now, englishText: "Today's sponsor is a headphone company. Use our promo code.", chineseText: "")]
+    let first = entries
+    model.generate(sourceRevision: 1) { first }
+    await waitForSummary(model)
+    let advertisement = model.text
+    entries.append(CaptionEntry(timestamp: .now, englishText: "The ad is over. Our topic today is how the hippocampus forms memories.", chineseText: ""))
+    let second = entries
+    model.generate(sourceRevision: 2) { second }
+    await waitForSummary(model)
+    #expect(model.text.hasPrefix(advertisement))
+    #expect(model.text.contains("耳机赞助"))
+    #expect(model.text.contains("记忆形成"))
+    #expect(model.map.topics.map(\.kind) == [.advertisement, .discussion])
+    #expect(model.map.topics[0].id == "T1")
+    #expect(model.map.topics[1].id == "T2")
+}
+
+private func topicBatch(_ count: Int = 1) -> SummaryBatch {
+    SummaryBatch(records: (0..<count).map { .init(sourceID: UUID(), text: "Record \($0 + 1)\n") })
+}
+
+@Test func topicAdditionsPreserveIDsTitlesOrderAndSeparateAdsEvenWithWrongTarget() throws {
+    let batch = topicBatch()
+    let first = try ConversationMindMap().adding(#"{"topic":"new:1","kind":"advertisement","title":"耳机赞助","branch":"优惠","text":"有优惠码。","sources":[1]}"#, batch: batch)
+    let ad = first.topics[0]
+    let second = try first.adding(#"{"topic":"T1","kind":"discussion","title":"记忆形成","branch":"机制","text":"海马体参与记忆。","sources":[1]}"#, batch: batch)
+    #expect(second.topics.count == 2)
+    #expect(second.topics[0] == ad)
+    let updated = try second.adding(#"{"topic":"T2","kind":"discussion","title":"禁止重命名旧主题","branch":"B1","text":"睡眠有助于巩固记忆。","sources":[1]}"#, batch: batch)
+    #expect(updated.topics.map(\.title) == ["耳机赞助", "记忆形成"])
+    #expect(updated.topics[1].branches[0].points[0] == second.topics[1].branches[0].points[0])
+    #expect(updated.topics[1].branches[0].points.count == 2)
+}
+
+@Test func topicForestKeepsDistinctEventsAndReturnsToExistingTopicWithoutGlobalRegrouping() throws {
+    let batch = topicBatch()
+    var map = ConversationMindMap()
+    for index in 0..<8 {
+        let output = "{\"topic\":\"new:1\",\"kind\":\"discussion\",\"title\":\"事件\(index)\",\"branch\":\"进展\",\"text\":\"独立事实\(index)。\",\"sources\":[1]}"
+        map = try map.adding(output, batch: batch)
+    }
+    let previous = map.topics
+    map = try map.adding(#"{"topic":"T2","kind":"discussion","branch":"B1","text":"后续决定：继续调查。","sources":[1]}"#, batch: batch)
+    #expect(map.topics.count == 8)
+    #expect(map.topics[0] == previous[0])
+    #expect(map.topics[2...] == previous[2...])
+    #expect(map.topics[1].id == previous[1].id)
+    #expect(map.topics[1].branches[0].points.count == 2)
+    #expect(map.context(limit: 200).count <= 200)
+}
+
+@Test func duplicateFactForAnExistingTopicMergesEvidenceWithoutChangingNodeIdentity() throws {
+    let batch = topicBatch(2)
+    let line = #"{"topic":"new:1","kind":"discussion","title":"睡眠","branch":"作用","text":"睡眠巩固记忆。","sources":[1]}"#
+    let original = try ConversationMindMap().adding(line, batch: batch)
+    let next = try original.adding(line.replacingOccurrences(of: "[1]", with: "[2]").replacingOccurrences(of: "new:1", with: "T1"), batch: batch)
+    #expect(next.topics.count == 1)
+    #expect(next.topics[0].branches[0].points.count == 1)
+    #expect(next.topics[0].branches[0].points[0].id == original.topics[0].branches[0].points[0].id)
+    #expect(next.topics[0].branches[0].points[0].sources == Set(batch.records.map(\.sourceID)))
+}
+
+@Test func topicDraftUsesOnlyCompleteOperationsAndInvalidOutputCannotReplaceMap() throws {
+    let batch = topicBatch()
+    let valid = #"{"topic":"new:1","kind":"discussion","title":"记忆","branch":"机制","text":"海马体参与记忆。","sources":[1]}"#
+    let draft = valid + "\n{\"topic\":\"new:2\",\"text\":\"未结束"
+    #expect(try ConversationMindMap().adding(draft, batch: batch, isDraft: true).topics.count == 1)
+    #expect(throws: SummaryError.self) { try ConversationMindMap().adding(draft, batch: batch) }
+    #expect(throws: SummaryError.self) { try ConversationMindMap().adding(valid.replacingOccurrences(of: "[1]", with: "[9]"), batch: batch) }
+    #expect(throws: SummaryError.self) { try ConversationMindMap().adding("主题：不能整图替换", batch: batch) }
+    #expect(try ConversationMindMap().adding("[]", batch: batch).topics.isEmpty)
+}
+
+@Test func sourceCorrectionInvalidatesOnlyDependentFactsAndRetainsOtherTopics() throws {
+    let batch = topicBatch(3)
+    let output = #"{"topic":"new:1","kind":"advertisement","title":"赞助","branch":"优惠","text":"赞助优惠。","sources":[1]}"# + "\n"
+        + #"{"topic":"new:2","kind":"discussion","title":"记忆","branch":"机制","text":"两句共同支持的记忆事实。","sources":[2,3]}"#
+    var map = try ConversationMindMap().adding(output, batch: batch)
+    let ad = map.topics[0]
+    let affected = map.dependentSources(of: [batch.records[1].sourceID])
+    #expect(affected == Set(batch.records.dropFirst().map(\.sourceID)))
+    map.invalidate(sources: affected)
+    #expect(map.topics[0] == ad)
+    #expect(map.topics[1].branches[0].points.isEmpty)
+    let repaired = try map.adding(#"{"topic":"T2","kind":"discussion","branch":"B1","text":"更正后的记忆事实。","sources":[2,3]}"#, batch: batch)
+    #expect(repaired.topics[0] == ad)
+    #expect(repaired.topics[1].id == "T2")
+    #expect(repaired.topics[1].branches[0].id == "B1")
+}
+
+@Test @MainActor func correctingOneCaptionKeepsOtherTopicNodesAndDoesNotReplayTheirText() async {
+    let engine = SummaryPatchStub([
+        #"{"topic":"new:1","kind":"advertisement","title":"赞助","branch":"优惠","text":"赞助优惠。","sources":[1]}"# + "\n"
+            + #"{"topic":"new:2","kind":"discussion","title":"记忆","branch":"机制","text":"旧识别结果。","sources":[2]}"#,
+        #"{"topic":"new:1","kind":"discussion","title":"住房政策","branch":"状态","text":"尚未表决。","sources":[1]}"#,
+        #"{"topic":"T2","kind":"discussion","branch":"B1","text":"更正后的识别结果。","sources":[1]}"#
+    ])
+    let model = ConversationSummaryModel { engine }
+    let ad = CaptionEntry(timestamp: .now, englishText: "Sponsor advertisement", chineseText: "")
+    let core = CaptionEntry(timestamp: .now, englishText: "Old recognition", chineseText: "")
+    model.generate(sourceRevision: 1) { [ad, core] }
+    await waitForSummary(model)
+    let housing = CaptionEntry(timestamp: .now, englishText: "Housing policy not yet passed", chineseText: "")
+    model.generate(sourceRevision: 2) { [ad, core, housing] }
+    await waitForSummary(model)
+    let unchanged = [model.map.topics[0], model.map.topics[2]]
+    let corrected = CaptionEntry(id: core.id, timestamp: core.timestamp, englishText: "Corrected recognition", chineseText: "")
+    model.generate(sourceRevision: 3) { [ad, corrected, housing] }
+    await waitForSummary(model)
+    #expect(engine.inputs.last == "[1] Corrected recognition\n")
+    #expect([model.map.topics[0], model.map.topics[2]] == unchanged)
+    #expect(model.map.topics[1].id == "T2")
+    #expect(!model.text.contains("旧识别结果"))
+    #expect(model.coveredCount == 3)
+}
+
+@Test func duplicateDetectionPreservesNegativeNumbersAndWordBoundaries() throws {
+    let batch = topicBatch()
+    let first = #"{"topic":"new:1","kind":"discussion","title":"数值","branch":"记录","text":"Temperature -1.","sources":[1]}"#
+    let map = try ConversationMindMap().adding(first, batch: batch)
+    let next = try map.adding(first.replacingOccurrences(of: "-1.", with: "1.").replacingOccurrences(of: "new:1", with: "T1"), batch: batch)
+    #expect(next.topics[0].branches[0].points.count == 2)
+}
+
+@Test func distinctNewEventsWithTheSameTitleRemainSeparateRoots() throws {
+    let batch = topicBatch(2)
+    let operations = #"{"topic":"new:1","kind":"discussion","title":"住房政策","branch":"北京","text":"北京讨论租金规则。","sources":[1]}"# + "\n"
+        + #"{"topic":"new:2","kind":"discussion","title":"住房政策","branch":"上海","text":"上海讨论住房供给。","sources":[2]}"#
+    let map = try ConversationMindMap().adding(operations, batch: batch)
+    #expect(map.topics.count == 2)
+    #expect(map.topics.map(\.id) == ["T1", "T2"])
+}
+
+@Test func otherwiseValidFactWithEmptyBranchUsesNeutralPointsLabel() throws {
+    let map = try ConversationMindMap().adding(#"{"topic":"new:1","kind":"advertisement","title":"耳机赞助","branch":"","text":"输入优惠码可享折扣。","sources":[1]}"#, batch: topicBatch())
+    #expect(map.topics[0].branches[0].title == "要点")
+    #expect(map.topics[0].branches[0].points[0].text == "输入优惠码可享折扣。")
+    let spaced = try ConversationMindMap().adding(#"{"topic":"new:1","kind":"discussion","title":"记忆","branch":" 机制 ","text":"海马体参与记忆。","sources":[1]}"#, batch: topicBatch())
+    #expect(spaced.topics[0].branches[0].title == "机制")
+}
+
+@Test func conflictingNewAliasTitlesAndMalformedAliasesCannotRegroupFacts() throws {
+    let batch = topicBatch(2)
+    let first = #"{"topic":"new:1","kind":"discussion","title":"北京住房政策","branch":"状态","text":"北京讨论租金规则。","sources":[1]}"#
+    let other = #"{"topic":"new:1","kind":"discussion","title":"上海住房政策","branch":"状态","text":"上海讨论住房供给。","sources":[2]}"#
+    #expect(throws: SummaryError.self) { try ConversationMindMap().adding(first + "\n" + other, batch: batch) }
+    #expect(throws: SummaryError.self) { try ConversationMindMap().adding(first.replacingOccurrences(of: "new:1", with: "new:或1"), batch: batch) }
+}
+
+@Test func routingIndexDoesNotReintroduceOldFactTextAsNewEvidence() throws {
+    let map = try ConversationMindMap().adding(#"{"topic":"new:1","kind":"advertisement","title":"耳机赞助","branch":"优惠","text":"输入优惠码可享九折。","sources":[1]}"#, batch: topicBatch())
+    let index = map.context(for: "耳机优惠")
+    #expect(index.contains("T1|advertisement|耳机赞助"))
+    #expect(index.contains("B1|优惠"))
+    #expect(!index.contains("优惠码"))
+    #expect(!index.contains("九折"))
+}
+
+@Test func unrelatedAdvertisementAndEventLabelsAreNotDefaultRoutingCandidates() throws {
+    let batch = topicBatch(2)
+    var map = try ConversationMindMap().adding(#"{"topic":"new:1","kind":"advertisement","title":"云声耳机赞助信息","branch":"优惠活动","text":"输入优惠码可享九折。","sources":[1]}"#, batch: batch)
+    #expect(map.context(for: "欢迎回到节目，今天讨论记忆形成，与刚才赞助无关。海马体参与记忆，睡眠帮助巩固。").isEmpty)
+    map = try map.adding(#"{"topic":"new:1","kind":"discussion","title":"记忆形成机制","branch":"海马体作用","text":"海马体参与情景记忆。","sources":[2]}"#, batch: batch)
+    #expect(map.context(for: "市议会讨论住房政策，支持者关注租金，反对者担心供应下降。").isEmpty)
+    let memoryIndex = map.context(for: "记忆形成过程中，情境会影响回忆。")
+    #expect(memoryIndex.contains("T2|discussion|记忆形成机制"))
+    #expect(!memoryIndex.contains("T1|"))
+}
+
+@Test func malformedBranchProtocolFragmentsCannotBecomeVisibleTitles() throws {
+    for title in ["B或新:1", "B3", "new:1", "T1", "B、记忆机制"] {
+        let line = "{\"topic\":\"new:1\",\"kind\":\"discussion\",\"title\":\"记忆\",\"branch\":\"\(title)\",\"text\":\"新的记忆事实。\",\"sources\":[1]}"
+        #expect(throws: SummaryError.self) { try ConversationMindMap().adding(line, batch: topicBatch()) }
+    }
+}
+
+@Test func streamedCompletePointsHaveStableIdentityAndOlderMatchingTopicsStayInRoutingIndex() throws {
+    let batch = SummaryBatch(records: [.init(sourceID: UUID(), text: "hippocampus memory formation\n")])
+    let operation = #"{"topic":"new:1","kind":"discussion","title":"记忆","branch":"机制","text":"海马体参与记忆。","sources":[1]}"#
+    let firstPreview = try ConversationMindMap().adding(operation, batch: batch, isDraft: true)
+    let nextPreview = try ConversationMindMap().adding(operation + "\n{", batch: batch, isDraft: true)
+    #expect(firstPreview.topics[0].branches[0].points[0].id == nextPreview.topics[0].branches[0].points[0].id)
+    var map = firstPreview
+    for index in 0..<30 {
+        let other = topicBatch()
+        let line = "{\"topic\":\"new:1\",\"kind\":\"discussion\",\"title\":\"独立事件\(index)\",\"branch\":\"近况\",\"text\":\"新的事件内容。\",\"sources\":[1]}"
+        map = try map.adding(line, batch: other)
+    }
+    let index = map.context(for: "Return to hippocampus memory formation", limit: 200)
+    #expect(index.contains("T1|discussion|记忆"))
+    #expect(index.count <= 200)
 }
 
 @MainActor private func waitForSummary(_ model: ConversationSummaryModel) async {
@@ -41,9 +255,9 @@ private func summaryEntries(_ count: Int) -> [CaptionEntry] {
 @Test func summaryChunksCoverEveryCharacterWithoutOversizedRequests() {
     let entries = [CaptionEntry(timestamp: .now, englishText: String(repeating: "中🙂A", count: 900), chineseText: ""),
                    CaptionEntry(timestamp: .now, englishText: "Last topic", chineseText: "")]
-    let chunks = SummaryTranscript.chunks(entries[...])
-    #expect(chunks.allSatisfy { $0.count <= 1_200 })
-    #expect(chunks.joined() == entries.map { $0.originalText + "\n" }.joined())
+    let batches = SummaryTranscript.batches(entries)
+    #expect(batches.allSatisfy { $0.records.map(\.text).joined().count <= 1_200 && $0.records.count <= 12 })
+    #expect(batches.flatMap(\.records).map(\.text).joined() == entries.map { $0.originalText + "\n" }.joined())
 }
 
 @Test @MainActor func collapsedSummaryDoesNotLoadAModel() {
@@ -67,7 +281,7 @@ private func summaryEntries(_ count: Int) -> [CaptionEntry] {
     #expect(engine.cancelled)
 }
 
-@Test @MainActor func summaryUpdateProcessesOnlyNewRowsAndRestartsAfterSourceCorrection() async {
+@Test @MainActor func summaryUpdateProcessesOnlyNewRowsAndRepairsDependentFactsAfterSourceCorrection() async {
     var engines: [SummaryStub] = []
     let model = ConversationSummaryModel {
         let engine = SummaryStub(); engines.append(engine); return engine
@@ -76,13 +290,14 @@ private func summaryEntries(_ count: Int) -> [CaptionEntry] {
     let first = entries
     model.generate(sourceRevision: 3) { first }
     await waitForSummary(model)
-    let oldText = model.text
+    let oldContext = model.map.context()
     entries.append(CaptionEntry(timestamp: .now, englishText: "A new topic", chineseText: ""))
     let second = entries
     model.generate(sourceRevision: 4) { second }
     await waitForSummary(model)
-    #expect(engines[1].requests.first?.0 == "A new topic\n")
-    #expect(engines[1].requests.first?.1 == oldText)
+    #expect(engines[1].requests.first?.0 == "[1] A new topic\n")
+    #expect(!oldContext.isEmpty)
+    #expect(engines[1].requests.first?.1.isEmpty == true)
     let original = entries[0]
     entries[0] = CaptionEntry(id: original.id, timestamp: original.timestamp,
         englishText: "An earlier source correction", chineseText: "")
@@ -90,7 +305,7 @@ private func summaryEntries(_ count: Int) -> [CaptionEntry] {
     model.generate(sourceRevision: 5) { corrected }
     await waitForSummary(model)
     #expect(engines[2].requests.first?.0.contains("An earlier source correction") == true)
-    #expect(engines[2].requests.first?.1.isEmpty == true)
+    #expect(engines[2].requests.first?.1.contains("T1|discussion|") == true)
 }
 
 @Test @MainActor func clearingOrCollapsingRejectsLateSummaryEvenIfBackendIgnoresCancellation() async {
@@ -129,7 +344,7 @@ private func summaryEntries(_ count: Int) -> [CaptionEntry] {
     #expect(model.errorMessage != nil)
     model.generate(sourceRevision: 2) { second }
     await waitForSummary(model)
-    #expect(engines[2].requests.first?.0 == "New material\n")
+    #expect(engines[2].requests.first?.0 == "[1] New material\n")
     #expect(model.coveredCount == 2)
 }
 
@@ -184,8 +399,7 @@ private func summaryEntries(_ count: Int) -> [CaptionEntry] {
     vm.addCaption(english: "Third topic", chinese: "")
     await waitForAutomaticSummary(model)
     #expect(engine.requests.count == 2)
-    #expect(engine.requests.last?.0 == "Second topic\nThird topic\n")
-    #expect(engine.requests.last?.1.isEmpty == false)
+    #expect(engine.requests.last?.0 == "[1] Second topic\n[2] Third topic\n")
     #expect(engine.maximumActiveRequests == 1)
     #expect(engine.prepared == 1)
     #expect(!engine.cancelled)
@@ -238,7 +452,7 @@ private func summaryEntries(_ count: Int) -> [CaptionEntry] {
     vm.addCaption(english: "New after idle", chinese: "")
     await waitForAutomaticSummary(model)
     #expect(engines.count == 2)
-    #expect(engines.last?.requests.first?.0 == "New after idle\n")
+    #expect(engines.last?.requests.first?.0 == "[1] New after idle\n")
     model.collapse()
 }
 
@@ -308,56 +522,6 @@ private func summaryEntries(_ count: Int) -> [CaptionEntry] {
     }
 }
 
-@Test func mindMapPreservesTopicBranchesAndTheirOwnPoints() {
-    let source = "主题：幸福与伴侣关系\n- 婚姻选择\n  - 有人看重住房条件。\n  - 发言者表达惊讶。\n- 幸福理解\n  - 双方正在讨论何为美好生活。"
-    let map = ConversationMindMap.parse(source)
-    #expect(map?.topic == "幸福与伴侣关系")
-    #expect(map?.branches.map(\.title) == ["婚姻选择", "幸福理解"])
-    #expect(map?.branches[0].points == ["有人看重住房条件。", "发言者表达惊讶。"])
-    #expect(map?.branches[1].points == ["双方正在讨论何为美好生活。"])
-}
-
-@Test func streamedMindMapWaitsForTopicAndAddsIncompleteNodesWithoutChangingParents() {
-    #expect(ConversationMindMap.parse("主", isDraft: true) == nil)
-    #expect(ConversationMindMap.parse("主题：", isDraft: true) == nil)
-    let early = ConversationMindMap.parse("主题：幸福\n- 关系\n  -", isDraft: true)
-    #expect(early?.topic == "幸福")
-    #expect(early?.branches.count == 1)
-    #expect(early?.branches[0].points.isEmpty == true)
-    let next = ConversationMindMap.parse("主题：幸福\n- 关系\n  - 住房条件\n- 不同看法\n  - 仍在讨论", isDraft: true)
-    #expect(next?.branches[0].points == ["住房条件"])
-    #expect(next?.branches[1].points == ["仍在讨论"])
-}
-
-@Test func mindMapLimitsVisibleNodesWithoutDroppingOverflowFacts() {
-    let source = "主题：测试\n" + (0..<9).map { branch in
-        "- 话题\(branch)\n" + (0..<5).map { "  - P\(branch).\($0)\n" }.joined()
-    }.joined()
-    let map = ConversationMindMap.parse(source)!
-    #expect(map.branches.count <= 5)
-    #expect(map.branches.allSatisfy { $0.points.count <= 3 })
-    let displayed = map.branches.flatMap { [$0.title] + $0.points }.joined(separator: "\n")
-    for branch in 0..<9 {
-        for point in 0..<5 { #expect(displayed.contains("P\(branch).\(point)")) }
-    }
-}
-
-@Test func nonOutlineSummaryKeepsAllOriginalTextAsReadableFallback() {
-    let source = "在聊什么\n软件使用体验。\n\n主要内容\n一个尚未解决的问题。"
-    let map = ConversationMindMap.parse(source)
-    #expect(map?.branches.first?.points == [source])
-}
-
-@Test func mindMapKeepsOrphanProseAndRecognizesMarkdownStarBullets() {
-    let prose = ConversationMindMap.parse("主题：发布计划\n先完成测试，再决定上线。")
-    #expect(prose?.branches.first?.points == ["先完成测试，再决定上线。"])
-    let mixed = ConversationMindMap.parse("主题：发布计划\n暂未决定上线。\n* 测试\n  * 先检查字幕。\n- 发布\n  - 等待结果。")
-    #expect(mixed?.branches.map(\.title) == ["对话大意", "测试", "发布"])
-    #expect(mixed?.branches.first?.points == ["暂未决定上线。"])
-    #expect(mixed?.branches.dropFirst().first?.points == ["先检查字幕。"])
-    #expect(mixed?.branches.dropFirst(2).first?.points == ["等待结果。"])
-}
-
 @Test @MainActor func summaryStartupTimeoutIsDistinctAndStopsItsWorker() async throws {
     let folder = FileManager.default.temporaryDirectory.appendingPathComponent("SummaryWorkerTimeout.\(UUID())")
     try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -375,4 +539,43 @@ private func summaryEntries(_ count: Int) -> [CaptionEntry] {
     } catch SummaryError.startupTimedOut {
         // The missing-health path is distinct from worker exit and model absence.
     } catch { Issue.record("Wrong startup error: \(error)") }
+}
+
+@Test func schemaEnvelopePreviewsCompleteObjectsAndRejectsTruncation() throws {
+    let operation = #"{"topic":"new:1","kind":"discussion","title":"记忆形成","branch":"机制","text":"原文含有\"引号\"及}符号。","sources":[1]}"#
+    let prefix = "{\"additions\":[" + operation
+    let draft = try ConversationMindMap().adding(prefix + ",{", batch: topicBatch(), isDraft: true)
+    let batch = topicBatch()
+    let preview = try ConversationMindMap().adding(prefix, batch: batch, isDraft: true)
+    let final = try ConversationMindMap().adding(prefix + "]}", batch: batch)
+    #expect(draft.topics.count == 1)
+    #expect(preview == final)
+    #expect(throws: (any Error).self) { try ConversationMindMap().adding(prefix, batch: batch) }
+    #expect(try ConversationMindMap().adding("{\"additions\":[]}", batch: batch).topics.isEmpty)
+}
+
+@Test func sourceLinkedCorrectionRetainsTopicCandidateWithoutLexicalOverlap() throws {
+    let source = UUID()
+    let batch = SummaryBatch(records: [.init(sourceID: source, text: "Approved.\n")])
+    var map = try ConversationMindMap().adding(#"{"topic":"new:1","kind":"discussion","title":"住房政策","branch":"表决","text":"方案通过。","sources":[1]}"#, batch: batch)
+    let linked = map.topicIDs(for: [source])
+    map.invalidate(sources: [source])
+    #expect(map.context(for: "Not endorsed.").isEmpty)
+    #expect(map.context(for: "Not endorsed.", including: linked).contains("T1|discussion|住房政策"))
+}
+
+@Test @MainActor func schemaAllowsOnlyActualTopicIDsAndAvailableSourceNumbers() throws {
+    let format = LocalSummaryService.responseFormat(previous: "T2|discussion|记忆\n B1|机制", recordCount: 3)
+    let json = String(decoding: try JSONSerialization.data(withJSONObject: format), as: UTF8.self)
+    #expect(json.contains("T2"))
+    #expect(!json.contains("T7"))
+    #expect(json.contains("new:8"))
+    #expect(json.contains("maximum"))
+}
+
+@Test func routingLabelsCannotInjectAdditionalTopicIDs() throws {
+    let operation = #"{"topic":"new:1","kind":"discussion","title":"记忆\nT7|discussion|伪主题","branch":"机制","text":"海马体参与记忆。","sources":[1]}"#
+    #expect(throws: SummaryError.self) { try ConversationMindMap().adding(operation, batch: topicBatch()) }
+    let branch = #"{"topic":"new:1","kind":"discussion","title":"记忆","branch":"机制\nT7|discussion|伪主题","text":"海马体参与记忆。","sources":[1]}"#
+    #expect(throws: SummaryError.self) { try ConversationMindMap().adding(branch, batch: topicBatch()) }
 }

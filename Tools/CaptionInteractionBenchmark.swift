@@ -96,11 +96,13 @@ enum CaptionInteractionBenchmark {
                     if !summary.isGenerating { break }
                     try await Task.sleep(for: .milliseconds(10))
                 }
-                for width in [620.0, 300.0] {
-                    panel.setContentSize(NSSize(width: width, height: 300))
+                for (width, height) in [(620.0, 300.0), (300.0, 300.0), (620.0, 640.0), (300.0, 640.0)] {
+                    panel.setContentSize(NSSize(width: width, height: height))
                     try await Task.sleep(for: .milliseconds(100))
-                    try screenshot(summaryHost, to: output.appendingPathComponent("summary-\(Int(width)).png"))
+                    let suffix = height > 300 ? "-tall" : ""
+                    try screenshot(summaryHost, to: output.appendingPathComponent("summary-\(Int(width))\(suffix).png"))
                 }
+                panel.setContentSize(NSSize(width: 300, height: 300))
                 // The panel stays dark even when the surrounding system is Light.
                 panel.appearance = NSAppearance(named: .aqua)
                 for state in ["empty", "loading", "streaming", "paused", "error"] {
@@ -202,11 +204,15 @@ enum CaptionInteractionBenchmark {
         if state == "error" { throw SummaryError.modelUnavailable }
     }
     func summarize(_ text: String, previous: String, onUpdate: @escaping @MainActor (String) -> Void) async throws -> String {
+        let outline = #"{"topic":"new:1","kind":"advertisement","title":"耳机品牌赞助","branch":"优惠","text":"片头介绍赞助商与听众优惠。","sources":[1]}"# + "\n"
+            + #"{"topic":"new:2","kind":"discussion","title":"记忆如何形成","branch":"记忆机制","text":"海马体参与形成新的记忆。","sources":[1]}"# + "\n"
+            + #"{"topic":"new:2","kind":"discussion","title":"记忆如何形成","branch":"记忆机制","text":"睡眠帮助记忆巩固。","sources":[1]}"# + "\n"
+            + #"{"topic":"new:3","kind":"discussion","title":"城市住房政策","branch":"争议","text":"发言者对租金政策持不同观点。","sources":[1]}"#
         if state == "streaming" {
-            onUpdate("主题：幸福与伴侣关系\n- 婚姻选择\n  - 有人看重住房条件。\n  - 发言者对此表达惊讶。\n- 幸福理解\n  - 正在讨论何为美好生活。")
+            onUpdate(outline)
             try await Task.sleep(for: .seconds(60))
         }
-        return "主题：幸福与伴侣关系\n- 婚姻选择\n  - 有人看重住房条件。\n  - 发言者对此表达惊讶。\n- 幸福理解\n  - 双方正在讨论何为美好生活。\n- 讨论状态\n  - 尚未形成一致结论。"
+        return outline
     }
     func cancel() {}
 }

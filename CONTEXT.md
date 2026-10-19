@@ -2,16 +2,16 @@
 
 ## Product boundary
 
-### Automatic local conversation mind map (1.7.2 / build 24)
+### Append-only local topic forest (1.7.3 / build 25)
 
 `ConversationSummaryView` adds a default-collapsed right-edge tab over the existing
-native dark caption panel. First expansion immediately starts a Chinese outline:
-one central topic, normally 2–4 topic branches and 1–2 short points per branch.
-`ConversationMindMap` parses streamed text into `ConversationMindMapView`, a connected
-native tree. The first branch starts expanded; other branches fold, with click to
-toggle and a copy-outline action. The drawer is at most 380pt wide and supports a
-300pt caption window. Prose fallback retains the original output as a readable
-branch rather than inventing factual relationships. While expanded and unpaused,
+native dark caption panel. First expansion immediately starts independent topic
+trees owned by `ConversationMindMap`, with kinds `discussion`, `advertisement` and
+`uncertain`. Advertisements start as compact folded rows; other roots start expanded, with their
+first branch expanded. Topics and branches toggle independently, and the outline
+can be copied. Lazy topic views retain stable topic/branch/point identities as
+new facts arrive. Titles and existing tree order are immutable. The drawer is at
+most 380pt wide and supports a 300pt caption window. While expanded and unpaused,
 completed original-source changes
 schedule automatic updates after a two-second delay anchored to the first change;
 further changes do not postpone that scheduled update. Busy changes replace one
@@ -23,11 +23,51 @@ stored height preference. Preserve this overlay behavior and the incumbent UI.
 
 Production summary input reads the full current capture session from
 `CaptionHistoryStore`, never just the 100-row live cache. Only completed original
-source text is summarized. `SummaryTranscript` splits all input into bounded
-1,200-character chunks, passing the previous summary to each subsequent request.
-An unchanged source prefix permits incremental processing of appended captions;
-an earlier original-source correction restarts from the complete session. Summaries
-are approximate AI output, held in memory only, and are reset on capture-session
+source text is summarized. `SummaryTranscript.batches` bounds each batch to 900
+source characters and 12 numbered records, splitting oversized utterances. The
+model receives only new/changed records and a labels-only routing index of at most
+1,200 characters: T/kind/topic title and B/branch title, with no old point text or
+old summary. Bounded source-derived keywords select relevant topics privately and
+are not sent as factual material. There is never a request to rewrite the full graph. Initial processing still
+covers the complete saved session. Production llama `response_format` constrains
+one JSON object with an `additions` array of at most eight nodes. All fields are
+required; topic values are enumerated from actual candidates and `new:1`–`new:8`,
+and sources are bounded to this batch's record numbers. Software validates the
+complete package before committing. Existing T/B IDs or new titles route additions
+into the forest; old NDJSON remains parser/fixture compatibility only. Unrelated subjects
+create roots and returning subjects can target existing roots. Kind mismatch
+cannot place discussion under an advertisement: it uses the supplied title to
+route to a new separate topic. Each explicit `new:` alias creates an independent
+root, even with an existing title/kind; titles never cause global topic merging.
+Repeated use of the same alias within its batch targets that batch's new root.
+Topic references must match `Tn` or `new:n` with a positive integer; conflicting
+titles for the same new topic alias reject the update and retain the completed
+forest instead of attaching facts beneath a misleading parent. Topic/branch labels
+reject newlines and `|` so they cannot forge routing entries. A branch must reference
+an existing B ID or have a trimmed new name beginning with a Chinese character.
+Only explicit existing T-ID routing can append to an old topic; normalized exact
+facts in its selected branch merge source evidence while preserving point identity,
+negative signs and word boundaries. For ordinary new-source batches, the bounded index
+includes only up to six topics with lexical overlap; unrelated recent topics never
+fill spare space. Chinese matching uses title/branch bigrams. At most 256 English
+source keywords per topic are retained privately for routing English speech to
+Chinese titles. Generic program/sponsorship terms are filtered. This is conservative
+lexical retrieval: pronouns or paraphrases without overlap may create duplicate
+roots, old topics can be omitted, and classification can fail.
+
+Source corrections invalidate only points depending on changed captions and
+reprocess the transitive closure of those points' source evidence. Their topic IDs
+are traced from the previous completed map's point.sources and prioritized in the
+candidate index even without lexical overlap, subject to the same six-topic and
+1,200-character limits; this does not guarantee every linked topic is included. Unaffected
+nodes retain their IDs and order. New point IDs are deterministic SHA-256 hashes
+of topic/branch/source/text identity; complete-node previews publish only when the
+outline changes. Streaming draft scanning handles escaped strings and previews
+complete objects from the additions array over the old forest. Completed
+graph, source keys and coverage metadata commit only after all
+batches succeed; cancellation/failure keeps the previous completed graph. A limit
+of 300 topics/6,000 facts pauses additions retaining that graph; full transcripts
+remain in history. Results are approximate AI output, held in memory only, and reset on capture-session
 change or clear. They are not summaries of older saved sessions.
 
 `LocalSummaryService` uses a separate Qwen3-4B-Instruct-2507 Q4_K_M model and private Unix socket,
@@ -39,10 +79,8 @@ launch-error, startup-exit-code and timeout messages. AppLogger records only pro
 metadata (PID, error/exit code and elapsed time), never transcript text. Continuous updates reuse
 one worker; after 15 seconds idle it is released even while expanded. New source
 after idle reloads the worker, but an unchanged source does not trigger inference.
-SSE output streams draft text into the drawer. Completed text, source keys and
-coverage metadata commit only after all chunks finish with an explicit stop;
-cancelled, truncated or failed output discards the draft and preserves the prior
-completed summary. Fold, pause, minimize, phone-only mode, clear, capture-session
+SSE output previews complete draft nodes in the drawer; incomplete objects wait
+for completion. Fold, pause, minimize, phone-only mode, clear, capture-session
 change, quit and memory pressure cancel work and release the worker; generation
 guards reject late results. Errors and memory warnings pause automatic updates
 until the user retries, avoiding repeated restarts on every caption. Model
@@ -52,7 +90,35 @@ revision and full SHA-256 and copies an available llama.cpp runtime. App executi
 has no Python dependency. Model weights stay out of git.
 
 The local `SystemLanguageModel` probe reported `deviceNotEligible`; this feature
-does not use Apple Foundation Models. Historical 1.7.0 synthetic-text inference
+does not use Apple Foundation Models. The production prompt reads sources first
+and defines the schema fields without concrete JSON examples. Empty/whitespace
+branch names use neutral `要点`; malformed B references or new-topic tokens used as
+branch names are rejected. Same-title isolation, source-local correction,
+cancellation, stable draft IDs and retrieval have regression coverage. Final
+sequential regression passed 360 tests in 10.843s, including 34 summary-focused
+tests; seven AppLoggerTests and one companionInstalledTranslation fixture remain
+excluded. One five-stage production SSE/apply replay passed:
+readiness at 15.316s, ad/memory/housing/return-to-memory completion at
+31.184/47.238/65.859/82.425s, then eight dense facts appended to original T2 by
+134.922s. Ad and housing nodes, including source evidence, remained unchanged.
+The probe exited 0; peak child RSS was 4,049,632 KiB (about 3.86 GiB). This is one
+synthetic sample, not a classification, latency, memory or real-ASR-concurrency
+guarantee. The actual template/tokenizer sample measured 1,515 prompt tokens plus
+1,024 output within the 4,096 context for 900 source/1,200 index characters, not a
+global worst-case bound. Evidence: `build/topic-mindmap/real-model.log`. Source-ID range checks
+cannot prove semantic grounding; earlier replay exposed wrong routing and copied
+facts attributed to unsupported sources. Keep those grounding assertions strict.
+Nine summary captures passed review under `build/topic-mindmap/preview/`: the
+first discussion branch/whole first fact is visible at 300pt minimum height, and
+300/620pt-wide, 640pt-tall views show independent connected memory/housing trees.
+Final independent review had no required fixes. Arbitrary podcasts, VoiceOver,
+full-capacity long sessions and concurrent real ASR/translation load remain unverified.
+Release build succeeded. `scripts/install-local.sh` installed 1.7.3/build 25,
+confirmed by bundle metadata; the app is running and strict signature verification
+passed with unchanged signing identity. Previous 1.7.2 is retained at
+`/Applications/StreamTranslate.app.previous`.
+Historical
+1.7.0 synthetic-text inference
 observed preparation/first-generation/update times of 13.4/16.9/16.1s and a separate
 two-request sample peaked at about 3.7 GiB child RSS; these are not 1.7.1 measurements
 or guarantees. Historical 1.7.1 sequential regression passed 339 tests, including 13 summary
@@ -66,7 +132,7 @@ An initial probe timed out while an installed-app summary worker was also runnin
 the isolated single-worker rerun succeeded and left no worker behind. The sample
 still retained outdated unresolved wording, so semantic consistency is not assured.
 Those 300pt states and 620pt completed previews passed, and independent review found
-no mandatory code changes for 1.7.1. Current 1.7.2 sequential regression passed
+no mandatory code changes for 1.7.1. Historical 1.7.2 sequential regression passed
 346 tests in 10.932s, including 20 summary-focused tests and five parser cases,
 with the same eight shared-log/installed-asset exclusions. The exit-42 and orphan-
 prose/star-bullet regressions were verified failing before the fixes and passing
@@ -79,9 +145,9 @@ old manual/undecided wording and retained the unresolved subtitle issue, but sti
 turned writing requirements into a branch and added unsupported correction wording.
 300/620pt state previews passed and independent review found no required changes;
 physical scrolling, copy and AX operation are not verified by screenshots. Xcode
-Release build passed; 1.7.2/build 24 is installed and running, strict signature
-verification passed with unchanged signing identity, and 1.7.1 is retained at
-`/Applications/StreamTranslate.app.previous`. Older backups were archived by the
+Release build passed; 1.7.2/build 24 was installed and launched, strict signature
+verification passed with unchanged signing identity, and 1.7.1 was retained at
+`/Applications/StreamTranslate.app.previous` then. Older backups were archived by the
 existing installer; the user log was backed up under ignored `build/diagnosis/`
 before launch. Earlier startup samples, with installed ASR and
 translation helpers active, were 42.83s with old flags, 21.66s with explicit CPU

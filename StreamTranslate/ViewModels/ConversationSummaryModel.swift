@@ -6,20 +6,35 @@ struct SummarySourceKey: Equatable, Sendable {
     let textHash: Int
 }
 
+struct SummaryBatch: Sendable {
+    struct Record: Sendable {
+        let sourceID: UUID
+        let text: String
+    }
+    let records: [Record]
+    var input: String {
+        records.enumerated().map { "[\($0.offset + 1)] " + $0.element.text }.joined()
+    }
+}
+
 enum SummaryTranscript {
-    /// Bounded requests cover every sentence, including a single very long one.
-    /// A fresh model request folds the preceding summary into each next chunk.
-    static func chunks(_ entries: ArraySlice<CaptionEntry>, limit: Int = 1_200) -> [String] {
+    static func batches(_ entries: [CaptionEntry], limit: Int = 900) -> [SummaryBatch] {
         let limit = max(1, limit)
-        var result: [String] = [], current = "", count = 0
+        var result: [SummaryBatch] = [], records: [SummaryBatch.Record] = [], count = 0
         for entry in entries {
+            var fragment = ""
             for character in entry.originalText + "\n" {
-                if count == limit { result.append(current); current = ""; count = 0 }
-                current.append(character)
+                if count == limit {
+                    if !fragment.isEmpty { records.append(.init(sourceID: entry.id, text: fragment)); fragment = "" }
+                    result.append(SummaryBatch(records: records)); records = []; count = 0
+                }
+                fragment.append(character)
                 count += 1
             }
+            if !fragment.isEmpty { records.append(.init(sourceID: entry.id, text: fragment)) }
+            if records.count >= 12 { result.append(SummaryBatch(records: records)); records = []; count = 0 }
         }
-        if !current.isEmpty { result.append(current) }
+        if !records.isEmpty { result.append(SummaryBatch(records: records)) }
         return result
     }
 }
@@ -27,7 +42,10 @@ enum SummaryTranscript {
 @MainActor @Observable final class ConversationSummaryModel {
     var isExpanded = false
     private(set) var isAutoUpdating = true
-    private(set) var text = ""
+    private(set) var map = ConversationMindMap()
+    private(set) var draftMap: ConversationMindMap?
+    var text: String { map.outline }
+    var displayedMap: ConversationMindMap { draftMap ?? map }
     private(set) var draftText = ""
     private(set) var isGenerating = false
     private(set) var isUpdateScheduled = false
@@ -60,7 +78,7 @@ enum SummaryTranscript {
 
     func reset() {
         cancel()
-        text = ""; sourceKeys = []; coveredCount = 0; isAutoUpdating = true
+        map = ConversationMindMap(); sourceKeys = []; coveredCount = 0; isAutoUpdating = true
         completedAt = nil; completedSourceRevision = nil; errorMessage = nil
     }
 
@@ -76,7 +94,7 @@ enum SummaryTranscript {
         pending = nil; isUpdateScheduled = false
         service?.cancel(); service = nil
         memoryMonitor?.cancel(); memoryMonitor = nil
-        isGenerating = false; progress = ""; draftText = ""
+        isGenerating = false; progress = ""; draftText = ""; draftMap = nil
     }
 
     /// Anchor the delay to the first change so continuous speech cannot keep
@@ -108,7 +126,7 @@ enum SummaryTranscript {
         memoryMonitor?.cancel()
         generation &+= 1
         let requestedGeneration = generation
-        isGenerating = true; errorMessage = nil; draftText = ""; progress = "正在读取本次完整记录…"
+        isGenerating = true; errorMessage = nil; draftText = ""; draftMap = nil; progress = "正在读取本次完整记录…"
         let monitor = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)
         monitor.setEventHandler { [weak self] in
             Task { @MainActor [weak self] in
@@ -123,7 +141,7 @@ enum SummaryTranscript {
             var activeService = self.service
             defer {
                 if self.generation == requestedGeneration {
-                    self.task = nil; self.isGenerating = false; self.progress = ""; self.draftText = ""
+                    self.task = nil; self.isGenerating = false; self.progress = ""; self.draftText = ""; self.draftMap = nil
                     if self.isExpanded, self.isAutoUpdating, self.errorMessage == nil, activeService != nil {
                         self.service = activeService
                         self.releaseAfterIdle(generation: requestedGeneration)
@@ -141,18 +159,22 @@ enum SummaryTranscript {
                 let entries = try await load()
                 try Task.checkCancellation()
                 guard self.generation == requestedGeneration else { return }
-                let previousKeys = self.sourceKeys, previousText = self.text
-                let (keys, chunks, canContinue, captionCount) = await Task.detached(priority: .utility) {
+                let previousKeys = self.sourceKeys, previousMap = self.map
+                let (keys, batches, affected, captionCount) = await Task.detached(priority: .utility) {
                     let entries = entries.filter { !$0.originalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
                     let keys = entries.map { SummarySourceKey(id: $0.id, textHash: $0.originalText.hashValue) }
-                    let canContinue = !previousText.isEmpty && keys.starts(with: previousKeys)
-                    return (keys, SummaryTranscript.chunks(entries.dropFirst(canContinue ? previousKeys.count : 0)),
-                            canContinue, entries.count)
+                    let old = Dictionary(uniqueKeysWithValues: previousKeys.map { ($0.id, $0.textHash) })
+                    let current = Dictionary(uniqueKeysWithValues: keys.map { ($0.id, $0.textHash) })
+                    let changed = Set(previousKeys.filter { current[$0.id] != $0.textHash }.map(\.id))
+                    let affected = previousMap.dependentSources(of: changed)
+                    let changedEntries = entries.filter { old[$0.id] != $0.originalText.hashValue || affected.contains($0.id) }
+                    return (keys, SummaryTranscript.batches(changedEntries), affected, entries.count)
                 }.value
                 try Task.checkCancellation()
-                guard self.generation == requestedGeneration, captionCount > 0 else { return }
-                var result = canContinue ? previousText : ""
-                if !chunks.isEmpty {
+                guard self.generation == requestedGeneration else { return }
+                var result = previousMap
+                result.invalidate(sources: affected)
+                if !batches.isEmpty {
                     if activeService == nil {
                         let engine = self.makeService()
                         activeService = engine; self.service = engine
@@ -170,20 +192,32 @@ enum SummaryTranscript {
                         ticker.cancel()
                     }
                     guard let engine = activeService else { throw SummaryError.modelUnavailable }
-                    for (index, chunk) in chunks.enumerated() {
+                    for (index, batch) in batches.enumerated() {
                         try Task.checkCancellation()
                         guard self.generation == requestedGeneration else { return }
-                        self.progress = "正在梳理对话 \(index + 1)/\(chunks.count)…"
-                        self.draftText = ""
-                        result = try await engine.summarize(chunk, previous: result) { [weak self] partial in
+                        self.progress = "正在补充话题 \(index + 1)/\(batches.count)…"
+                        let baseline = result
+                        let correctedSources = Set(batch.records.map(\.sourceID)).intersection(affected)
+                        let linked = previousMap.topicIDs(for: correctedSources)
+                        let additions = try await engine.summarize(batch.input, previous: baseline.context(for: batch.input, including: linked)) { [weak self] partial in
                             guard let self, self.generation == requestedGeneration, !Task.isCancelled else { return }
-                            self.draftText = partial
+                            if let preview = try? baseline.adding(partial, batch: batch, isDraft: true) {
+                                let outline = preview.outline
+                                if outline != self.draftText {
+                                    self.draftMap = preview; self.draftText = outline
+                                }
+                            }
                         }
+                        try Task.checkCancellation()
+                        guard self.generation == requestedGeneration else { return }
+                        result = try baseline.adding(additions, batch: batch)
+                        self.draftMap = result; self.draftText = result.outline
                     }
                 }
                 try Task.checkCancellation()
                 guard self.generation == requestedGeneration else { return }
-                self.text = result; self.sourceKeys = keys
+                result.pruneEmptyTopics()
+                self.map = result; self.sourceKeys = keys
                 self.coveredCount = captionCount; self.completedAt = .now
                 self.completedSourceRevision = sourceRevision
             } catch is CancellationError { return }

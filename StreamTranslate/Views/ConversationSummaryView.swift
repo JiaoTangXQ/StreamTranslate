@@ -7,10 +7,7 @@ struct ConversationSummaryView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var summary: ConversationSummaryModel { viewModel.conversationSummary }
-    private var displayedText: String { summary.draftText.isEmpty ? summary.text : summary.draftText }
-    private var mindMap: ConversationMindMap? {
-        ConversationMindMap.parse(summary.draftText, isDraft: true) ?? ConversationMindMap.parse(summary.text)
-    }
+    private var displayedText: String { summary.displayedMap.outline }
 
     var body: some View {
         GeometryReader { geometry in
@@ -65,7 +62,7 @@ struct ConversationSummaryView: View {
                 } label: {
                     Image(systemName: "doc.on.doc").frame(width: 26, height: 30)
                 }
-                .buttonStyle(.plain).disabled(displayedText.isEmpty)
+                .buttonStyle(.plain).disabled(!summary.displayedMap.hasContent)
                 .accessibilityLabel("复制脑图文字").help("复制完整的主题、分支和要点")
                 Button { summary.collapse() } label: {
                     Image(systemName: "chevron.right").frame(width: 30, height: 30)
@@ -79,8 +76,8 @@ struct ConversationSummaryView: View {
             Divider().overlay(.white.opacity(0.15))
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    if let mindMap {
-                        ConversationMindMapView(map: mindMap)
+                    if summary.displayedMap.hasContent {
+                        ConversationMindMapView(map: summary.displayedMap)
                         if !summary.isGenerating, let date = summary.completedAt {
                             HStack(spacing: 4) {
                                 Text("已梳理 \(summary.coveredCount) 条 ·")
@@ -91,7 +88,7 @@ struct ConversationSummaryView: View {
                     } else if !summary.isGenerating && summary.errorMessage == nil {
                         Text("先听几句话，再来看脑图。")
                             .font(.system(size: 14, weight: .medium))
-                        Text("新字幕会自动整理为主题、话题分支和要点。点击分支可展开或收起。")
+                        Text("新内容补充到对应话题；广告和不同主题各自分开。点击话题或分支可展开、收起。")
                             .font(.system(size: 12)).foregroundStyle(.white.opacity(0.7))
                     }
                     if summary.isGenerating {
