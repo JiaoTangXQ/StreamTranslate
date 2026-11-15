@@ -100,6 +100,43 @@ enum TranslationTarget: String, CaseIterable, Identifiable {
     }
 }
 
+/// Non-linear choices keep short meetings responsive without making long
+/// sessions trigger needless model work. The cases are ordered by duration so
+/// the wheel always moves forward as it scrolls down.
+enum SummaryUpdateInterval: Int, CaseIterable, Identifiable, Hashable, Sendable {
+    case seconds30 = 30
+    case seconds50 = 50
+    case minute1 = 60
+    case seconds80 = 80
+    case minutes5 = 300
+    case minutes10 = 600
+    case minutes20 = 1_200
+    case minutes30 = 1_800
+    case hour1 = 3_600
+    case hours2 = 7_200
+
+    var id: Int { rawValue }
+
+    var duration: Duration { .seconds(Double(rawValue)) }
+
+    var displayName: String {
+        switch self {
+        case .seconds30: return "30 秒"
+        case .seconds50: return "50 秒"
+        case .minute1: return "1 分钟"
+        case .seconds80: return "80 秒"
+        case .minutes5: return "5 分钟"
+        case .minutes10: return "10 分钟"
+        case .minutes20: return "20 分钟"
+        case .minutes30: return "30 分钟"
+        case .hour1: return "1 小时"
+        case .hours2: return "2 小时"
+        }
+    }
+
+    var summaryDescription: String { "约 \(displayName)集中整理一次" }
+}
+
 struct ASRModel: Identifiable, Hashable {
     enum Backend: String, Hashable, Sendable {
         case nemotron
@@ -291,6 +328,10 @@ final class CaptionSettings {
         didSet { defaults.set(translationRefinementEnabled, forKey: "translationRefinementEnabled") }
     }
 
+    var summaryUpdateInterval: SummaryUpdateInterval {
+        didSet { defaults.set(summaryUpdateInterval.rawValue, forKey: "summaryUpdateInterval") }
+    }
+
     var captureDiagnosticsEnabled: Bool {
         didSet {
             defaults.set(captureDiagnosticsEnabled, forKey: "captureDiagnosticsEnabled")
@@ -350,6 +391,9 @@ final class CaptionSettings {
         recognitionVocabulary = defaults.string(forKey: "recognitionVocabulary") ?? ""
         recognitionReviewEnabled = defaults.object(forKey: "recognitionReviewEnabled") as? Bool ?? true
         translationRefinementEnabled = defaults.object(forKey: "translationRefinementEnabled") as? Bool ?? true
+
+        let savedSummaryInterval = defaults.integer(forKey: "summaryUpdateInterval")
+        summaryUpdateInterval = SummaryUpdateInterval(rawValue: savedSummaryInterval) ?? .seconds30
 
         captureDiagnosticsEnabled = defaults.bool(forKey: "captureDiagnosticsEnabled")
 

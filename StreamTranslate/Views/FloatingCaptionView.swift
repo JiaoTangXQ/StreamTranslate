@@ -34,6 +34,7 @@ struct FloatingCaptionView: View {
     @State private var sidebarWidth: CGFloat = CaptionWorkspaceStyle.sidebarWidth
     @State private var dividerStart: CGFloat?
     @State private var controlsHeight: CGFloat = 58
+    @State private var exportError: String?
     @FocusState private var summaryButtonFocused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -232,6 +233,14 @@ struct FloatingCaptionView: View {
             guard viewModel.conversationSummary.isExpanded else { return .ignored }
             viewModel.conversationSummary.collapse(); return .handled
         }
+        .alert("导出失败", isPresented: Binding(
+            get: { exportError != nil },
+            set: { if !$0 { exportError = nil } }
+        )) {
+            Button("好") { exportError = nil }
+        } message: {
+            Text(exportError ?? "无法导出当前字幕。")
+        }
     }
 
     private func workspaceToolbar(compact: Bool) -> some View {
@@ -253,6 +262,10 @@ struct FloatingCaptionView: View {
                 }
             }
             Spacer(minLength: 4)
+            captionExportMenu
+            CaptionToolbarButton(title: "清空当前字幕和脑图", symbol: "trash") {
+                viewModel.clearCurrentSession()
+            }
             Button {
                 if viewModel.conversationSummary.isExpanded { viewModel.conversationSummary.collapse() }
                 else { compactPage = "summary"; viewModel.expandConversationSummary() }
@@ -271,6 +284,41 @@ struct FloatingCaptionView: View {
             .keyboardShortcut("s", modifiers: [.command, .shift])
         }
         .padding(.horizontal, 14).frame(height: 38)
+    }
+
+    private var captionExportMenu: some View {
+        Menu {
+            Button("导出字幕 HTML…") { exportCaptions(.html) }
+                .disabled(viewModel.captionHistory.isEmpty)
+            Button("导出字幕 PDF…") { exportCaptions(.pdf) }
+                .disabled(viewModel.captionHistory.isEmpty)
+            Divider()
+            Button("清空当前字幕和脑图", role: .destructive) {
+                viewModel.clearCurrentSession()
+            }
+        } label: {
+            Image(systemName: "square.and.arrow.up")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(CaptionWorkspaceStyle.secondary)
+                .frame(width: 30, height: 30)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .help("导出当前字幕或清空当前字幕和脑图")
+        .accessibilityLabel("字幕导出与清空")
+    }
+
+    private func exportCaptions(_ format: ConversationExportFormat) {
+        Task { @MainActor in
+            do {
+                let entries = try await viewModel.currentSessionCaptions()
+                _ = try await ConversationExportService.exportCaptions(entries, format: format)
+            } catch is CancellationError {
+                // Closing the save panel is a normal cancellation.
+            } catch {
+                exportError = error.localizedDescription
+            }
+        }
     }
 
     private static func isAtBottom(_ geometry: ScrollGeometry) -> Bool {

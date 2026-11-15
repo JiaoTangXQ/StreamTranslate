@@ -6,7 +6,18 @@ script_dir=${0:A:h}
 project_root=${script_dir:h}
 signing_name="StreamTranslate Local Code Signing"
 destination="/Applications/StreamTranslate.app"
-backup="/Applications/StreamTranslate.app.previous"
+backup="/Applications/StreamTranslate.previous"
+legacy_backup="/Applications/StreamTranslate.app.previous"
+
+# A previous installer used a .app.previous bundle. macOS LaunchServices can
+# discover that bundle when opening by identifier, so migrate it before any
+# new install is launched.
+if [[ -e "$legacy_backup" && ! -e "$backup" ]]; then
+    mv "$legacy_backup" "$backup"
+fi
+for legacy_archive in "$project_root"/build/app-backups/*/StreamTranslate.app(N); do
+    mv "$legacy_archive" "$legacy_archive.backup"
+done
 
 cd "$project_root"
 if ! xcodebuild -version >/dev/null 2>&1; then
@@ -83,7 +94,7 @@ if [[ -e "$backup" ]]; then
     # Keep earlier rollback copies instead of silently deleting the last one.
     mkdir -p "$project_root/build/app-backups"
     archived_backup=$(mktemp -d "$project_root/build/app-backups/install.XXXXXX")
-    mv "$backup" "$archived_backup/StreamTranslate.app"
+    mv "$backup" "$archived_backup/StreamTranslate.app.backup"
 fi
 if [[ -e "$destination" ]]; then
     mv "$destination" "$backup"
@@ -98,7 +109,7 @@ trap 'restore_previous; cleanup' EXIT
 
 mv "$staged_app" "$destination"
 codesign --verify --deep --strict "$destination"
-open -a "$destination"
+"$destination/Contents/MacOS/StreamTranslate" >/dev/null 2>&1 </dev/null &
 
 for _ in {1..20}; do
     pgrep -x StreamTranslate >/dev/null && break
@@ -114,6 +125,6 @@ fi
 trap cleanup EXIT
 echo "Installed signed StreamTranslate at $destination"
 if [[ -e "$backup" ]]; then
-    echo "Previous version retained at $backup"
+    echo "Previous version retained at $backup (kept outside LaunchServices app discovery)"
 fi
 print -r -- "$designated_requirement"

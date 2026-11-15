@@ -50,7 +50,7 @@ import Foundation
             // Cloud retries release any previous local worker before starting.
             local?.cancel(); local = nil
             let engine = cloud ?? makeCloud(); cloud = engine
-            backendDescription = "AI 脑图 · 云端总结"
+            backendDescription = engine.backendDescription
             do {
                 try await engine.prepare()
                 let output = try await engine.summarize(text, previous: previous, onUpdate: onUpdate)

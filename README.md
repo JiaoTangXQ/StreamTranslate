@@ -96,7 +96,7 @@ the unsigned app bundle without installing, run `./scripts/build-app.sh` (output
 (bundled with full Xcode); Command Line Tools alone can build the app but may not
 provide the `Testing` module.
 
-The installer retains the previous signed app at `/Applications/StreamTranslate.app.previous` for rollback. Older rollback copies are archived under `build/app-backups/` on subsequent installs.
+The installer retains the previous signed app at `/Applications/StreamTranslate.previous` for rollback. The rollback copy intentionally does not use a `.app` suffix, so macOS cannot launch it by bundle identifier. Older rollback copies are archived under `build/app-backups/` with the same non-application suffix.
 
 For the Xcode workflow:
 

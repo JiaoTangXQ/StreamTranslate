@@ -304,6 +304,16 @@ struct SettingsView: View {
                     ? "先显示快速译文，再精修终稿。内存紧张时自动使用系统翻译；并非每句都能获得提升。"
                     : "增强模型暂不可用，继续使用 Apple 翻译。若模型在外置磁盘，请保持磁盘连接。")
             }
+            section("脑图整理") {
+                HStack(alignment: .center, spacing: 14) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("自动整理间隔").font(.system(size: 13, weight: .medium))
+                        note("字幕持续变化时，按这个间隔集中更新一次脑图。最短 30 秒，最长 2 小时。")
+                    }
+                    Spacer(minLength: 0)
+                    SummaryIntervalPicker(selection: $settings.summaryUpdateInterval)
+                }
+            }
         }
     }
 

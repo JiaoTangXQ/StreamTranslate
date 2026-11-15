@@ -32,7 +32,8 @@ for path in sorted((ROOT / 'StreamTranslateTests').glob('*.swift')):
     converted = source.replace('import Testing\n', '\n').replace('@Test ', '').replace('@Test\n', '\n')
     converted = converted.replace('@testable import StreamTranslate\n', '\n')
     converted = converted.replace('#expect(', 'portableExpect(')
-    if '#require' in converted or '@Suite' in converted:
+    converted = converted.replace('#require(', 'portableRequire(')
+    if '@Suite' in converted:
         raise RuntimeError(f'Unsupported macro in {path.name}')
     parts.append(f'#sourceLocation(file: "{path}", line: 1)\n{converted}\n#sourceLocation()\n')
 (OUT / 'ConvertedTests.swift').write_text('\n'.join(parts))
@@ -56,6 +57,26 @@ enum PortableResult {
 func portableExpect(_ condition: Bool, _ message: String? = nil,
                     file: StaticString = #filePath, line: UInt = #line) {
     if !condition { PortableResult.fail("\\(file):\\(line) \\(message ?? "expectation failed")") }
+}
+func portableExpect<E: Error, T>(throws expected: E.Type, _ expression: () throws -> T,
+                                file: StaticString = #filePath, line: UInt = #line) {
+    do {
+        _ = try expression()
+        PortableResult.fail("\\(file):\\(line) expected \\(expected) to be thrown")
+    } catch is E {
+        return
+    } catch {
+        PortableResult.fail("\\(file):\\(line) unexpected error \\(error)")
+    }
+}
+struct PortableRequirementFailure: Error {}
+func portableRequire<T>(_ value: T?, _ message: String? = nil,
+                        file: StaticString = #filePath, line: UInt = #line) throws -> T {
+    guard let value else {
+        PortableResult.fail("\\(file):\\(line) \\(message ?? "requirement failed")")
+        throw PortableRequirementFailure()
+    }
+    return value
 }
 enum Issue {
     static func record(_ message: String) { PortableResult.fail(message) }

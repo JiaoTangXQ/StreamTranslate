@@ -64,7 +64,7 @@ enum SummaryTranscript {
     @ObservationIgnored private var service: (any ConversationSummaryProviding)?
     @ObservationIgnored private var memoryMonitor: DispatchSourceMemoryPressure?
     @ObservationIgnored private let makeService: () -> any ConversationSummaryProviding
-    @ObservationIgnored private let updateDelay: Duration
+    @ObservationIgnored private var updateDelay: Duration
     @ObservationIgnored private let idleTimeout: Duration
     private struct Request {
         let revision: Int
@@ -76,6 +76,17 @@ enum SummaryTranscript {
          makeService: @escaping () -> any ConversationSummaryProviding = { AutomaticSummaryService() }) {
         self.updateDelay = updateDelay; self.idleTimeout = idleTimeout
         self.makeService = makeService
+    }
+
+    /// Changing the preference while a batch is waiting takes effect on that
+    /// pending batch instead of leaving the old 30-second timer behind.
+    var configuredUpdateDelay: Duration {
+        get { updateDelay }
+        set {
+            guard updateDelay != newValue else { return }
+            updateDelay = newValue
+            reschedulePendingUpdate()
+        }
     }
 
     func reset() {
@@ -118,6 +129,12 @@ enum SummaryTranscript {
             self.scheduledTask = nil; self.pending = nil; self.isUpdateScheduled = false
             self.generate(sourceRevision: request.revision, load: request.load)
         }
+    }
+
+    private func reschedulePendingUpdate() {
+        guard scheduledTask != nil, !isGenerating, let pending else { return }
+        scheduledTask?.cancel(); scheduledTask = nil; isUpdateScheduled = false
+        scheduleAutomaticUpdate(sourceRevision: pending.revision, load: pending.load)
     }
 
     func generate(sourceRevision: Int, load: @escaping @MainActor () async throws -> [CaptionEntry]) {

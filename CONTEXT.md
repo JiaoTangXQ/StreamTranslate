@@ -66,13 +66,15 @@ parent 700), with file values taking precedence over process variables. An expli
 summary keys outside the signed app; configuration is never bundled or committed.
 No ASR, Qwen review or translation service reads these settings or changes behavior.
 
-Configured summaries use the Zhizengzeng OpenAI-compatible Chat Completions API
-and the selected model (currently `deepseek-v4.1-flash`). Only new text and routing
-labels are sent; no audio. An ephemeral HTTPS URLSession streams SSE, rejects
-redirects, keeps certificate validation and logs no provider body or key. Requests
-are serial, capped at 2048 output tokens, with a 15s idle/45s resource timeout.
-Cloud success never starts a local summary worker. Without configuration, local
-summary behavior remains available. The drawer reports the selected provider.
+Configured summaries use the selected DeepSeek, OpenAI, Zhizengzeng or other
+OpenAI-compatible Chat Completions API and model. DeepSeek uses
+`https://api.deepseek.com` with `deepseek-flash`; OpenAI uses its `/v1` endpoint
+and a configured Chat Completions model. Only new text and routing labels are sent;
+no audio. An ephemeral HTTPS URLSession streams SSE, rejects redirects, keeps
+certificate validation and logs no provider body or key. Requests are serial,
+capped at 2048 output tokens, with a 15s idle/45s resource timeout. Cloud success
+never starts a local summary worker. Without configuration, local summary behavior
+remains available. The drawer reports the selected provider.
 
 HTTP/network/truncation or map-validation failures retry the same batch locally;
 the old complete map is preserved until success. One shared 60s cooldown avoids

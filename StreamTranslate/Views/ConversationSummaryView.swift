@@ -4,8 +4,10 @@ import SwiftUI
 /// close, pause and the window lifecycle do that.
 struct ConversationSummaryView: View {
     @Environment(CaptionViewModel.self) private var viewModel
+    @Environment(CaptionSettings.self) private var settings
     @State private var copied = false
     @State private var viewportHeight: CGFloat = 0
+    @State private var exportError: String?
     private var summary: ConversationSummaryModel { viewModel.conversationSummary }
 
     var body: some View {
@@ -26,6 +28,10 @@ struct ConversationSummaryView: View {
                     NSPasteboard.general.setString(summary.map.outline, forType: .string)
                     copied = true
                 }.disabled(!summary.map.hasContent)
+                mindMapExportMenu
+                CaptionToolbarButton(title: "清空当前字幕和脑图", symbol: "trash") {
+                    viewModel.clearCurrentSession()
+                }
             }
             .padding(.horizontal, 20).padding(.top, 14).padding(.bottom, 12)
             ScrollView {
@@ -53,23 +59,83 @@ struct ConversationSummaryView: View {
         }
         .foregroundStyle(CaptionWorkspaceStyle.foreground)
         .background(CaptionWorkspaceStyle.sidebar)
+        .onAppear { summary.configuredUpdateDelay = settings.summaryUpdateInterval.duration }
+        .onChange(of: settings.summaryUpdateInterval) { _, interval in
+            summary.configuredUpdateDelay = interval.duration
+        }
         .onChange(of: summary.completedAt) { copied = false }
         .onKeyPress(.escape) { summary.collapse(); return .handled }
+        .alert("导出失败", isPresented: Binding(
+            get: { exportError != nil },
+            set: { if !$0 { exportError = nil } }
+        )) {
+            Button("好") { exportError = nil }
+        } message: {
+            Text(exportError ?? "无法导出当前脑图。")
+        }
+    }
+
+    private var mindMapExportMenu: some View {
+        Menu {
+            Button("导出脑图 HTML…") { exportMindMap(.html) }
+                .disabled(!summary.map.hasContent)
+            Button("导出脑图 PDF…") { exportMindMap(.pdf) }
+                .disabled(!summary.map.hasContent)
+            Divider()
+            Button("清空当前字幕和脑图", role: .destructive) {
+                viewModel.clearCurrentSession()
+            }
+        } label: {
+            Image(systemName: "square.and.arrow.up")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(CaptionWorkspaceStyle.secondary)
+                .frame(width: 30, height: 30)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .help("导出当前脑图或清空当前字幕和脑图")
+        .accessibilityLabel("脑图导出与清空")
+    }
+
+    private func exportMindMap(_ format: ConversationExportFormat) {
+        Task { @MainActor in
+            do {
+                _ = try await ConversationExportService.exportMindMap(summary.map, format: format)
+            } catch is CancellationError {
+                // Closing the save panel is a normal cancellation.
+            } catch {
+                exportError = error.localizedDescription
+            }
+        }
     }
 
     private var statusBar: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if let error = summary.errorMessage {
-                Label(error, systemImage: "exclamationmark.circle")
-                    .font(.system(size: 12)).lineLimit(3)
-                    .foregroundStyle(CaptionWorkspaceStyle.foreground)
-            } else {
-                HStack(spacing: 7) {
-                    if summary.isGenerating { ProgressView().controlSize(.mini) }
-                    Text(summary.isGenerating ? "整理完成后一起更新" : summary.isAutoUpdating ? "约 30 秒集中整理一次" : "自动整理已暂停")
+        @Bindable var settings = settings
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center, spacing: 12) {
+                if let error = summary.errorMessage {
+                    Label(error, systemImage: "exclamationmark.circle")
+                        .font(.system(size: 12)).lineLimit(3)
+                        .foregroundStyle(CaptionWorkspaceStyle.foreground)
+                } else {
+                    HStack(spacing: 7) {
+                        if summary.isGenerating { ProgressView().controlSize(.mini) }
+                        Text(summary.isGenerating ? "整理完成后一起更新" : summary.isAutoUpdating ? settings.summaryUpdateInterval.summaryDescription : "自动整理已暂停")
+                        Spacer(minLength: 0)
+                    }
+                    .font(.system(size: 11)).foregroundStyle(CaptionWorkspaceStyle.secondary)
+                }
+                if summary.errorMessage == nil {
+                    SummaryIntervalPicker(selection: $settings.summaryUpdateInterval, compact: true)
+                        .help("调整脑图自动整理间隔")
+                }
+            }
+            if summary.errorMessage == nil {
+                HStack {
+                    Text("滚轮可选择整理间隔")
+                        .font(.system(size: 10)).foregroundStyle(CaptionWorkspaceStyle.secondary)
                     Spacer(minLength: 0)
                 }
-                .font(.system(size: 11)).foregroundStyle(CaptionWorkspaceStyle.secondary)
             }
             HStack(spacing: 8) {
                 Button(summary.errorMessage != nil ? "重试" : "整理一次") {

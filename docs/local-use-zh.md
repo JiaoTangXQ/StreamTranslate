@@ -55,6 +55,6 @@ Large-v3 Turbo 是额外可选模型，选择它会另行下载。
 安装脚本使用固定的本地签名证书；首次创建时，系统可能要求输入 Mac 登录密码。
 密码应只输入到 macOS 的系统对话框。
 
-安装后保留上一版 `/Applications/StreamTranslate.app.previous`；项目的 `build/enhancement-baseline/` 也保留本轮升级前的 App。回退前先退出当前 App，不要同时运行两个版本。
+安装后保留上一版 `/Applications/StreamTranslate.previous`；回退包不使用 `.app` 后缀，避免 macOS 重启时误启动旧版本。项目的 `build/enhancement-baseline/` 也保留本轮升级前的 App。回退前先退出当前 App，不要同时运行两个版本。
 
 日志位置：`~/Library/Logs/StreamTranslate.log`。

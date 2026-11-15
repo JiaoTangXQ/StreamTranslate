@@ -453,6 +453,26 @@ final class CaptionViewModel {
         } else { conversationSummary.generate(sourceRevision: conversationSourceRevision, load: load) }
     }
 
+    /// Returns the complete active session for export. The floating window is
+    /// intentionally capped at 100 rows, so export reads the journal and then
+    /// overlays any in-memory translation/review updates that are still being
+    /// flushed.
+    func currentSessionCaptions() async throws -> [CaptionEntry] {
+        let live = captionHistory.filter { $0.timestamp >= companionSessionStartedAt }
+        guard let historyStore else { return live }
+        let stored = try await historyStore.captions(in: companionSessionID)
+        var merged = Dictionary(uniqueKeysWithValues: stored.map { ($0.id, $0) })
+        for entry in live { merged[entry.id] = entry }
+        return merged.values.sorted { $0.timestamp < $1.timestamp }
+    }
+
+    /// Clear only the active capture session. Archived sessions remain
+    /// available from the history window, while subsequent captions and the
+    /// brain map start from a fresh session boundary.
+    func clearCurrentSession() {
+        clearHistory()
+    }
+
     func clearHistory() {
         beginCompanionSession()
         captionGeneration += 1

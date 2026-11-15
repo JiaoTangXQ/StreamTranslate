@@ -20,7 +20,7 @@ import Foundation
         }
     }
 
-    var backendDescription: String { "AI 脑图 · 云端总结" }
+    var backendDescription: String { configuration.backendDescription }
     var usesLocalModel: Bool { false }
     func prepare() async throws { try Task.checkCancellation(); if cancelled { throw CancellationError() } }
 
@@ -50,13 +50,7 @@ import Foundation
         request.setValue("Bearer " + configuration.apiKey, forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "model": configuration.model,
-            "messages": messages,
-            "response_format": ["type": "json_object"],
-            "thinking": ["type": "disabled"],
-            "max_tokens": maxTokens ?? configuration.maxTokens, "temperature": 0.2, "stream": true
-        ])
+        request.httpBody = try Self.requestBody(configuration: configuration, messages: messages, maxTokens: maxTokens)
         let (bytes, response) = try await session.bytes(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             throw CloudSummaryError.http((response as? HTTPURLResponse)?.statusCode ?? 0)
@@ -75,6 +69,20 @@ import Foundation
         try Task.checkCancellation()
         guard !cancelled else { throw CancellationError() }
         return try decoder.finish()
+    }
+
+    static func requestBody(configuration: SummaryCloudConfiguration,
+                            messages: [[String: String]], maxTokens: Int? = nil) throws -> Data {
+        var body: [String: Any] = [
+            "model": configuration.model,
+            "messages": messages,
+            "response_format": ["type": "json_object"],
+            "max_tokens": maxTokens ?? configuration.maxTokens, "temperature": 0.2, "stream": true
+        ]
+        if configuration.usesDeepSeekThinkingFlag {
+            body["thinking"] = ["type": "disabled"]
+        }
+        return try JSONSerialization.data(withJSONObject: body)
     }
 
     private struct NodeReference {

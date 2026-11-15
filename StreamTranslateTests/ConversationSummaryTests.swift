@@ -636,6 +636,22 @@ private func topicBatch(_ count: Int = 1) -> SummaryBatch {
     #expect(!model.isUpdateScheduled)
 }
 
+@Test @MainActor func changingSummaryIntervalRearmsPendingAutomaticUpdate() async throws {
+    let engine = SummaryStub()
+    let model = ConversationSummaryModel(updateDelay: .seconds(2)) { engine }
+    model.isExpanded = true
+    model.scheduleAutomaticUpdate(sourceRevision: 1) { summaryEntries(1) }
+    #expect(model.isUpdateScheduled)
+
+    model.configuredUpdateDelay = .milliseconds(10)
+    for _ in 0..<100 {
+        if !engine.requests.isEmpty { break }
+        try await Task.sleep(for: .milliseconds(5))
+    }
+    #expect(engine.requests.count == 1)
+    model.collapse()
+}
+
 @Test @MainActor func visibleSummaryRemainsCompleteWhileANewPatchIsStillStreaming() async throws {
     let engine = SummaryStub()
     let model = ConversationSummaryModel { engine }

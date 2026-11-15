@@ -2,7 +2,7 @@
 
 此配置只用于对话总结。语音识别、Apple 翻译、Qwen 校对和 Hy-MT 翻译的模型、请求、配置与调度均不改动。
 
-展开总结后，优先通过智增增的 OpenAI 兼容 Chat Completions API 调用 `deepseek-v4.1-flash`。发送本批新增字幕原文和话题标签目录，不发送音频；提供商会收到这些文字。API 使用 JSON object 模式，提示词附带本批节点 JSON Schema；最终结果仍由应用校验，这不等于提供商在解码时强制执行 schema。正常云端处理不加载本地总结模型。面板标明云端或本地状态，原有增量脑图和节点合并规则保持。
+展开总结后，使用配置文件中选择的 OpenAI 兼容 Chat Completions 提供商。支持 DeepSeek 官方 API、OpenAI 官方 API、原有智增增接口以及其他兼容服务。发送本批新增字幕原文和话题标签目录，不发送音频；提供商会收到这些文字。API 使用 JSON object 模式，提示词附带本批节点 JSON Schema；最终结果仍由应用校验，这不等于提供商在解码时强制执行 schema。正常云端处理不加载本地总结模型。面板标明具体云端提供商或本地状态，原有增量脑图和节点合并规则保持。
 
 超时、HTTP 错误、流式响应截断、无有效内容或脑图结构校验失败时，同一批输入转用原来的本地 Qwen3-4B-Instruct-2507。云端失败后等待 60 秒再尝试，避免连续字幕反复触发失败请求；这段时间复用一个本地 worker。重试云端时释放本地 worker；暂停、折叠或取消不会再启动本地回退。两端都失败时保留此前完成图并暂停更新。达到脑图容量限制不会为了重试而加载本地模型。
 
@@ -16,14 +16,23 @@ App 优先读取该配置文件；开发时可读取当前目录 `.env`，或通
 
 | 变量 | 用途 |
 |---|---|
-| `MODEL_PROVIDER` | 当前接入值为 `zhizengzeng` |
-| `ZHIZENGZENG_OPENAI_API_KEY` | 请求鉴权，不输出到日志 |
+| `MODEL_PROVIDER` | `deepseek`、`openai`、`zhizengzeng` 或其他兼容服务标签 |
+| `DEEPSEEK_API_KEY` | `deepseek` 提供商的请求鉴权，不输出到日志 |
+| `OPENAI_API_KEY` | `openai` 或其他兼容提供商的请求鉴权，不输出到日志 |
+| `ZHIZENGZENG_OPENAI_API_KEY` | 兼容旧配置的智增增请求鉴权，不输出到日志 |
 | `OPENAI_BASE_URL` | HTTPS API 根地址，自动追加 `/chat/completions` |
 | `OPENAI_MODEL` | 总结模型名称 |
 | `CHAT_COMPLETIONS_MAX_TOKENS` | 配置上限；脑图实际最多使用 2,048 输出 tokens |
 | `CHAT_COMPLETIONS_MAX_CONCURRENT_REQUESTS` | 保留配置；实时增量总结始终串行，一个请求 |
 | `CHAT_COMPLETIONS_REQUESTS_PER_SECOND` | 同一云端服务请求的频率上限，最高 20 |
 | `CHAT_COMPLETIONS_INSECURE_TLS` | 保留为 `false`；客户端始终验证证书，不提供跳过验证行为 |
+
+DeepSeek 官方配置示例使用 `MODEL_PROVIDER=deepseek`、`DEEPSEEK_API_KEY`、
+`OPENAI_BASE_URL=https://api.deepseek.com` 和 `OPENAI_MODEL=deepseek-flash`。
+OpenAI 官方配置示例使用 `MODEL_PROVIDER=openai`、`OPENAI_API_KEY`、
+`OPENAI_BASE_URL=https://api.openai.com/v1` 和对应的 Chat Completions 模型。
+DeepSeek 的非思考模式字段只会在 `deepseek` 和旧的 `zhizengzeng` 提供商中发送，
+避免把 DeepSeek 专用参数传给 OpenAI。
 
 兼容网关无 choices 的用量统计帧；它不会被当作正文或完成信号。仅移除已观察到的根对象 `type: json_object` 格式标记，其他多余字段或不合法节点仍拒绝，节点及来源编号校验不放宽。
 

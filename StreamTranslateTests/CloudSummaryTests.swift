@@ -29,6 +29,36 @@ private func cloudValues() -> [String: String] {
     #expect(SummaryCloudConfiguration.load(environment: [:], files: []) == nil)
 }
 
+@Test func summarySupportsDeepSeekOpenAIAndLegacyZhizengzengConfigurations() {
+    var deepseek = cloudValues()
+    deepseek["MODEL_PROVIDER"] = "deepseek"
+    deepseek.removeValue(forKey: "ZHIZENGZENG_OPENAI_API_KEY")
+    deepseek["DEEPSEEK_API_KEY"] = "deepseek-summary-key"
+    deepseek["OPENAI_BASE_URL"] = "https://api.deepseek.com"
+    deepseek["OPENAI_MODEL"] = "deepseek-flash"
+    let deepseekConfig = SummaryCloudConfiguration(values: deepseek)
+    #expect(deepseekConfig?.provider == "deepseek")
+    #expect(deepseekConfig?.apiKey == "deepseek-summary-key")
+    #expect(deepseekConfig?.backendDescription.contains("DeepSeek") == true)
+    #expect(deepseekConfig?.usesDeepSeekThinkingFlag == true)
+
+    var openAI = deepseek
+    openAI["MODEL_PROVIDER"] = "openai"
+    openAI.removeValue(forKey: "DEEPSEEK_API_KEY")
+    openAI["OPENAI_API_KEY"] = "openai-summary-key"
+    openAI["OPENAI_BASE_URL"] = "https://api.openai.com/v1"
+    openAI["OPENAI_MODEL"] = "gpt-4o-mini"
+    let openAIConfig = SummaryCloudConfiguration(values: openAI)
+    #expect(openAIConfig?.provider == "openai")
+    #expect(openAIConfig?.apiKey == "openai-summary-key")
+    #expect(openAIConfig?.backendDescription.contains("OpenAI") == true)
+    #expect(openAIConfig?.usesDeepSeekThinkingFlag == false)
+
+    let legacy = SummaryCloudConfiguration(values: cloudValues())
+    #expect(legacy?.provider == "zhizengzeng")
+    #expect(legacy?.apiKey == "test-summary-key")
+}
+
 @MainActor private final class FailoverSummaryStub: ConversationSummaryProviding {
     var prepared = 0, requests: [(String, String)] = []
     var cancelled = false, fails = false, delay: Duration = .zero
@@ -157,6 +187,28 @@ private final class SummaryWireURLProtocol: URLProtocol, @unchecked Sendable {
         client?.urlProtocolDidFinishLoading(self)
     }
     override func stopLoading() {}
+}
+
+@Test @MainActor func openAICompatibleRequestsDoNotSendDeepSeekOnlyFields() async throws {
+    var values = cloudValues()
+    values["MODEL_PROVIDER"] = "openai"
+    values.removeValue(forKey: "ZHIZENGZENG_OPENAI_API_KEY")
+    values["OPENAI_API_KEY"] = "openai-summary-key"
+    let host = "openai-" + UUID().uuidString.lowercased() + ".example"
+    values["OPENAI_BASE_URL"] = "https://" + host + "/v1"
+    values["OPENAI_MODEL"] = "gpt-4o-mini"
+    let settings = URLSessionConfiguration.ephemeral
+    settings.protocolClasses = [SummaryWireURLProtocol.self]
+    let service = CloudSummaryService(configuration: SummaryCloudConfiguration(values: values)!, session: URLSession(configuration: settings))
+    defer { service.cancel() }
+    _ = try await service.summarize("[1] Source fact\n", previous: "")
+    let sent = try #require(SummaryWireRequests.shared.get(host))
+    let config = try #require(SummaryCloudConfiguration(values: values))
+    let body = try CloudSummaryService.requestBody(configuration: config, messages: [], maxTokens: nil)
+    let object = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+    #expect(object["model"] as? String == "gpt-4o-mini")
+    #expect(object["thinking"] == nil)
+    #expect(sent.value(forHTTPHeaderField: "Authorization") == "Bearer openai-summary-key")
 }
 
 @Test @MainActor func cloudReviewsParaphrasesWithoutRewritingContentOrStartingLocalModel() async throws {
