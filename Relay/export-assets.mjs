@@ -10,3 +10,4 @@ for(const [name,file] of Object.entries({html:'index.html',css:'style.css',js:'a
   writeFileSync(path.join(out,file),text);
 }
 copyFileSync(new URL('./remote.js',import.meta.url),path.join(out,'remote.js'));
+copyFileSync(new URL('./mic-worklet.js',import.meta.url),path.join(out,'mic-worklet.js'));

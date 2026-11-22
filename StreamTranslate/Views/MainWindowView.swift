@@ -70,7 +70,7 @@ struct MainWindowView: View {
 
             Spacer()
 
-            Label(settings.audioInputSource.displayName, systemImage: inputIcon)
+            Label(shownSource.displayName, systemImage: inputIcon)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
 
@@ -95,8 +95,16 @@ struct MainWindowView: View {
         return "Start"
     }
 
+    private var shownSource: AudioInputSource {
+        viewModel.activeCaptureSource ?? settings.audioInputSource
+    }
+
     private var inputIcon: String {
-        settings.audioInputSource == .microphone ? "mic" : "speaker.wave.2"
+        switch shownSource {
+        case .microphone: "mic"
+        case .systemAudio: "speaker.wave.2"
+        case .phoneMicrophone: "iphone"
+        }
     }
 
     private var transcriptList: some View {

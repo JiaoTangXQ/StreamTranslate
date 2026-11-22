@@ -1,53 +1,87 @@
 import Foundation
 import Observation
 
-struct SummarySourceKey: Equatable, Sendable {
-    let id: UUID
-    let textHash: Int
+/// When to refresh the mind map automatically. A fixed interval fits neither a
+/// 10-minute talk nor a 5-hour session, so the interval grows with the session
+/// and the first map appears as soon as there is something to map.
+enum MindMapCadence {
+    /// Never start two automatic updates closer together than this.
+    static let minimumGap: TimeInterval = 12
+    static let firstMapCharacters = 80
+    static let minimumNewCharacters = 40
+    static let burstCharacters = 2_500
+
+    /// About 20 s early in a session, 50 s at 10 minutes, 4 minutes after
+    /// the first 48 minutes, when one update changes the overview little.
+    static func interval(sessionElapsed: TimeInterval) -> TimeInterval {
+        min(240, max(20, sessionElapsed / 12))
+    }
+
+    /// Seconds to wait before the next automatic update, or nil while there
+    /// is not yet enough new text. Anchored to the last update, so continuous
+    /// speech cannot keep postponing it.
+    static func delay(newCharacters: Int, hasMap: Bool, paneOpen: Bool, justOpened: Bool,
+                      sinceLastUpdate: TimeInterval?, sessionElapsed: TimeInterval) -> TimeInterval? {
+        guard newCharacters > 0 else { return nil }
+        let earliest = max(0, minimumGap - (sinceLastUpdate ?? .infinity))
+        if justOpened { return earliest }
+        if !hasMap { return newCharacters >= firstMapCharacters || paneOpen ? earliest : nil }
+        if newCharacters >= burstCharacters { return earliest }
+        guard newCharacters >= minimumNewCharacters else { return nil }
+        let since = sinceLastUpdate ?? .infinity
+        return max(earliest, interval(sessionElapsed: sessionElapsed) - since)
+    }
 }
 
-struct SummaryBatch: Sendable {
-    struct Record: Sendable {
+/// Splits not-yet-mapped captions into request-sized pieces. Fragments never
+/// exceed the smallest provider budget, so a batch built for the cloud can be
+/// regrouped for the local model without splitting again.
+enum MindMapBatcher {
+    struct Fragment: Equatable, Sendable {
         let sourceID: UUID
         let text: String
+        /// True for the fragment that completes its caption.
+        let completesSource: Bool
     }
-    let records: [Record]
-    var input: String {
-        records.enumerated().map { "[\($0.offset + 1)] " + $0.element.text }.joined()
-    }
-}
 
-enum SummaryTranscript {
-    static func batches(_ entries: [CaptionEntry], limit: Int = 900) -> [SummaryBatch] {
-        let limit = max(1, limit)
-        var result: [SummaryBatch] = [], records: [SummaryBatch.Record] = [], count = 0
+    static func fragments(_ entries: [CaptionEntry], limit: Int = LocalSummaryService.inputBudget) -> [Fragment] {
+        var result: [Fragment] = []
         for entry in entries {
-            var fragment = ""
-            for character in entry.originalText + "\n" {
-                if count == limit {
-                    if !fragment.isEmpty { records.append(.init(sourceID: entry.id, text: fragment)); fragment = "" }
-                    result.append(SummaryBatch(records: records)); records = []; count = 0
-                }
-                fragment.append(character)
-                count += 1
+            let text = entry.originalText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { continue }
+            var start = text.startIndex
+            while start < text.endIndex {
+                let end = text.index(start, offsetBy: max(1, limit - 1), limitedBy: text.endIndex) ?? text.endIndex
+                result.append(Fragment(sourceID: entry.id, text: String(text[start..<end]), completesSource: end == text.endIndex))
+                start = end
             }
-            if !fragment.isEmpty { records.append(.init(sourceID: entry.id, text: fragment)) }
-            if records.count >= 12 { result.append(SummaryBatch(records: records)); records = []; count = 0 }
         }
-        if !records.isEmpty { result.append(SummaryBatch(records: records)) }
         return result
+    }
+
+    /// The longest prefix of `fragments` whose newline-joined text fits.
+    static func batch(_ fragments: ArraySlice<Fragment>, budget: Int) -> ArraySlice<Fragment> {
+        var size = 0
+        var end = fragments.startIndex
+        while end < fragments.endIndex {
+            let next = fragments[end].text.count + 1
+            if size + next > budget, end > fragments.startIndex { break }
+            size += next
+            end += 1
+        }
+        return fragments[fragments.startIndex..<end]
     }
 }
 
 @MainActor @Observable final class ConversationSummaryModel {
+    /// The mind-map pane is visible.
     var isExpanded = false
     private(set) var isAutoUpdating = true
     private(set) var map = ConversationMindMap()
-    private(set) var draftMap: ConversationMindMap?
     var text: String { map.outline }
-    // Publish a coherent completed update; streaming patches remain internal.
+    /// Each successfully merged batch is published at once; streamed text
+    /// stays internal because a half-written JSON revision is meaningless.
     var displayedMap: ConversationMindMap { map }
-    private(set) var draftText = ""
     private(set) var isGenerating = false
     private(set) var isUpdateScheduled = false
     private(set) var backendDescription = "AI 脑图 · 自动选择"
@@ -55,8 +89,27 @@ enum SummaryTranscript {
     private(set) var errorMessage: String?
     private(set) var coveredCount = 0
     private(set) var completedAt: Date?
-    private(set) var completedSourceRevision: Int?
-    @ObservationIgnored private var sourceKeys: [SummarySourceKey] = []
+    /// Topics the latest update added or rewrote; the view opens these.
+    private(set) var recentlyChangedTopicIDs: [String] = []
+    /// Keep the map current while recording even when the pane is closed, so
+    /// opening it shows a map immediately. Only used with a cloud provider:
+    /// a background local model would hold ~4 GB during capture.
+    var backgroundUpdatesRequested = false {
+        didSet {
+            guard backgroundUpdatesRequested != oldValue else { return }
+            if isActive { evaluate() } else if !isGenerating { cancelScheduled() }
+        }
+    }
+    var backgroundUpdates: Bool { backgroundUpdatesRequested && cloudAvailable }
+    var isActive: Bool { isExpanded || backgroundUpdates }
+
+    @ObservationIgnored private var source: (@MainActor () async throws -> [CaptionEntry])?
+    @ObservationIgnored private var sessionStartedAt = Date()
+    @ObservationIgnored private var sourceCharacters = 0
+    @ObservationIgnored private var requestedCharacters = 0
+    @ObservationIgnored private var mappedSourceIDs: Set<UUID> = []
+    @ObservationIgnored private var previousTail = ""
+    @ObservationIgnored private var lastUpdateAt: Date?
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var scheduledTask: Task<Void, Never>?
@@ -64,193 +117,233 @@ enum SummaryTranscript {
     @ObservationIgnored private var service: (any ConversationSummaryProviding)?
     @ObservationIgnored private var memoryMonitor: DispatchSourceMemoryPressure?
     @ObservationIgnored private let makeService: () -> any ConversationSummaryProviding
-    @ObservationIgnored private var updateDelay: Duration
     @ObservationIgnored private let idleTimeout: Duration
-    private struct Request {
-        let revision: Int
-        let load: @MainActor () async throws -> [CaptionEntry]
-    }
-    @ObservationIgnored private var pending: Request?
+    @ObservationIgnored private let cadenceScale: Double
+    @ObservationIgnored private let now: () -> Date
+    @ObservationIgnored private let detectCloud: () -> Bool
+    @ObservationIgnored private var cachedCloudAvailability: Bool?
 
-    init(updateDelay: Duration = .seconds(30), idleTimeout: Duration = .seconds(45),
-         makeService: @escaping () -> any ConversationSummaryProviding = { AutomaticSummaryService() }) {
-        self.updateDelay = updateDelay; self.idleTimeout = idleTimeout
+    /// `cadenceScale` shortens every automatic delay in tests. The provider
+    /// has no default so a trailing closure always means the provider.
+    init(idleTimeout: Duration = .seconds(45), cadenceScale: Double = 1,
+         now: @escaping () -> Date = Date.init,
+         cloudAvailable: @escaping () -> Bool = { SummaryCloudConfiguration.load() != nil },
+         makeService: @escaping () -> any ConversationSummaryProviding) {
+        self.idleTimeout = idleTimeout; self.cadenceScale = cadenceScale
+        self.now = now; self.detectCloud = cloudAvailable
         self.makeService = makeService
     }
 
-    /// Changing the preference while a batch is waiting takes effect on that
-    /// pending batch instead of leaving the old 30-second timer behind.
-    var configuredUpdateDelay: Duration {
-        get { updateDelay }
-        set {
-            guard updateDelay != newValue else { return }
-            updateDelay = newValue
-            reschedulePendingUpdate()
-        }
+    private var cloudAvailable: Bool {
+        if let cachedCloudAvailability { return cachedCloudAvailability }
+        let available = detectCloud()
+        cachedCloudAvailability = available
+        return available
+    }
+
+    /// Characters of caption text not yet sent for mapping, for the status line.
+    var pendingCharacters: Int { max(0, sourceCharacters - requestedCharacters) }
+
+    /// A new capture session: forget the old map and read this session's
+    /// complete saved transcript from now on.
+    func begin(sessionStartedAt: Date, load: @escaping @MainActor () async throws -> [CaptionEntry]) {
+        reset()
+        self.sessionStartedAt = sessionStartedAt
+        source = load
+        cachedCloudAvailability = nil
     }
 
     func reset() {
         cancel()
-        map = ConversationMindMap(); sourceKeys = []; coveredCount = 0; isAutoUpdating = true
-        completedAt = nil; completedSourceRevision = nil; errorMessage = nil
+        map = ConversationMindMap(); mappedSourceIDs = []; previousTail = ""
+        sourceCharacters = 0; requestedCharacters = 0; lastUpdateAt = nil
+        coveredCount = 0; completedAt = nil; errorMessage = nil; isAutoUpdating = true
+        recentlyChangedTopicIDs = []
     }
 
-    func collapse() { isExpanded = false; cancel() }
+    /// Called whenever this session's original caption text grows or changes.
+    func sourceDidChange(characters: Int) {
+        sourceCharacters = characters
+        evaluate()
+    }
+
+    func expand() {
+        isExpanded = true
+        evaluate(justOpened: true)
+    }
+
+    /// Closing the pane keeps background work; without it, the local model
+    /// is released instead of waiting for the next update.
+    func collapse() {
+        isExpanded = false
+        if !backgroundUpdates { cancel() }
+    }
+
     func pauseAutomaticUpdates() { isAutoUpdating = false; cancel() }
-    func resumeAutomaticUpdates() { isAutoUpdating = true; errorMessage = nil }
+
+    func resumeAutomaticUpdates() {
+        isAutoUpdating = true; errorMessage = nil
+        evaluate(justOpened: true)
+    }
+
+    /// Manual "整理一次": merge everything new right away.
+    func requestNow() {
+        errorMessage = nil
+        generate()
+    }
 
     func cancel() {
         generation &+= 1
         task?.cancel(); task = nil
-        scheduledTask?.cancel(); scheduledTask = nil
+        cancelScheduled()
         idleTask?.cancel(); idleTask = nil
-        pending = nil; isUpdateScheduled = false
         service?.cancel(); service = nil
         memoryMonitor?.cancel(); memoryMonitor = nil
-        isGenerating = false; progress = ""; draftText = ""; draftMap = nil
+        isGenerating = false; progress = ""
     }
 
-    /// Anchor the delay to the first change so continuous speech cannot keep
-    /// postponing work. Busy updates overwrite one pending slot, never overlap.
-    func scheduleAutomaticUpdate(sourceRevision: Int, immediately: Bool = false,
-                                 load: @escaping @MainActor () async throws -> [CaptionEntry]) {
-        guard isExpanded, isAutoUpdating, errorMessage == nil,
-              sourceRevision != completedSourceRevision else { return }
-        pending = Request(revision: sourceRevision, load: load)
-        guard !isGenerating else { return }
-        if immediately { scheduledTask?.cancel(); scheduledTask = nil }
-        guard scheduledTask == nil else { return }
+    private func cancelScheduled() {
+        scheduledTask?.cancel(); scheduledTask = nil
+        isUpdateScheduled = false
+    }
+
+    private func evaluate(justOpened: Bool = false) {
+        guard isActive, isAutoUpdating, errorMessage == nil, !isGenerating, source != nil else { return }
+        let current = now()
+        guard let delay = MindMapCadence.delay(
+            newCharacters: sourceCharacters - requestedCharacters, hasMap: map.hasContent,
+            paneOpen: isExpanded, justOpened: justOpened,
+            sinceLastUpdate: lastUpdateAt.map { current.timeIntervalSince($0) },
+            sessionElapsed: current.timeIntervalSince(sessionStartedAt)) else {
+            cancelScheduled(); return
+        }
+        scheduledTask?.cancel()
         isUpdateScheduled = true
-        let scheduledGeneration = generation, delay = immediately ? .zero : updateDelay
+        let scheduledGeneration = generation
+        let wait = Duration.seconds(delay * cadenceScale)
         scheduledTask = Task { [weak self] in
-            do { try await Task.sleep(for: delay) } catch { return }
-            guard let self, self.generation == scheduledGeneration,
-                  self.isExpanded, self.isAutoUpdating, let request = self.pending else { return }
-            self.scheduledTask = nil; self.pending = nil; self.isUpdateScheduled = false
-            self.generate(sourceRevision: request.revision, load: request.load)
+            if wait > .zero { do { try await Task.sleep(for: wait) } catch { return } }
+            guard let self, self.generation == scheduledGeneration, self.isActive, self.isAutoUpdating else { return }
+            self.scheduledTask = nil; self.isUpdateScheduled = false
+            self.generate()
         }
     }
 
-    private func reschedulePendingUpdate() {
-        guard scheduledTask != nil, !isGenerating, let pending else { return }
-        scheduledTask?.cancel(); scheduledTask = nil; isUpdateScheduled = false
-        scheduleAutomaticUpdate(sourceRevision: pending.revision, load: pending.load)
-    }
-
-    func generate(sourceRevision: Int, load: @escaping @MainActor () async throws -> [CaptionEntry]) {
-        guard !isGenerating else { return }
-        pending = nil
-        scheduledTask?.cancel(); scheduledTask = nil; isUpdateScheduled = false
+    func generate() {
+        guard !isGenerating, let source else { return }
+        cancelScheduled()
         idleTask?.cancel(); idleTask = nil
         memoryMonitor?.cancel()
         generation &+= 1
         let requestedGeneration = generation
-        isGenerating = true; errorMessage = nil; draftText = ""; draftMap = nil; progress = "正在读取本次完整记录…"
+        isGenerating = true; errorMessage = nil; progress = "正在读取本次记录…"
+        let startCharacters = sourceCharacters
         let monitor = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)
         monitor.setEventHandler { [weak self] in
             Task { @MainActor [weak self] in
                 guard let self, self.generation == requestedGeneration, self.service?.usesLocalModel == true else { return }
                 self.pauseAutomaticUpdates()
-                self.errorMessage = "系统内存紧张，已暂停总结以减少占用。可稍后重试。"
+                self.errorMessage = "系统内存紧张，已暂停本机脑图整理以减少占用。可稍后重试。"
             }
         }
         memoryMonitor = monitor; monitor.resume()
         task = Task { [weak self] in
             guard let self else { return }
             var activeService = self.service
+            var completed = false
             defer {
                 if self.generation == requestedGeneration {
-                    self.task = nil; self.isGenerating = false; self.progress = ""; self.draftText = ""; self.draftMap = nil
-                    if self.isExpanded, self.isAutoUpdating, self.errorMessage == nil, activeService != nil {
+                    self.task = nil; self.isGenerating = false; self.progress = ""
+                    self.lastUpdateAt = self.now()
+                    // Failed or cancelled text stays pending for the retry.
+                    if completed { self.requestedCharacters = startCharacters }
+                    if self.isActive, self.isAutoUpdating, self.errorMessage == nil, activeService != nil {
                         self.service = activeService
                         self.releaseAfterIdle(generation: requestedGeneration)
                     } else {
                         activeService?.cancel(); self.service = nil
                         self.memoryMonitor?.cancel(); self.memoryMonitor = nil
                     }
-                    if let next = self.pending {
-                        self.pending = nil
-                        self.scheduleAutomaticUpdate(sourceRevision: next.revision, load: next.load)
-                    }
+                    self.evaluate()
                 } else { activeService?.cancel() }
             }
             do {
-                let entries = try await load()
+                let entries = try await source()
                 try Task.checkCancellation()
                 guard self.generation == requestedGeneration else { return }
-                let previousKeys = self.sourceKeys, previousMap = self.map
-                let (keys, batches, affected, captionCount) = await Task.detached(priority: .utility) {
-                    let entries = entries.filter { !$0.originalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-                    let keys = entries.map { SummarySourceKey(id: $0.id, textHash: $0.originalText.hashValue) }
-                    let old = Dictionary(uniqueKeysWithValues: previousKeys.map { ($0.id, $0.textHash) })
-                    let current = Dictionary(uniqueKeysWithValues: keys.map { ($0.id, $0.textHash) })
-                    let changed = Set(previousKeys.filter { current[$0.id] != $0.textHash }.map(\.id))
-                    let affected = previousMap.dependentSources(of: changed)
-                    let changedEntries = entries.filter { old[$0.id] != $0.originalText.hashValue || affected.contains($0.id) }
-                    return (keys, SummaryTranscript.batches(changedEntries), affected, entries.count)
-                }.value
-                try Task.checkCancellation()
-                guard self.generation == requestedGeneration else { return }
-                var result = previousMap
-                result.invalidate(sources: affected)
-                if !batches.isEmpty {
-                    if activeService == nil {
-                        let engine = self.makeService()
-                        activeService = engine; self.service = engine
-                        self.backendDescription = engine.backendDescription
-                        self.progress = "正在准备脑图服务…"
-                        let started = ContinuousClock.now
-                        let ticker = Task { [weak self] in
-                            while !Task.isCancelled {
-                                do { try await Task.sleep(for: .seconds(1)) } catch { return }
-                                guard !Task.isCancelled, let self, self.generation == requestedGeneration else { return }
-                                self.backendDescription = engine.backendDescription
-                                self.progress = "正在准备脑图服务 · \(started.duration(to: .now).components.seconds) 秒"
-                            }
+                let mapped = self.mappedSourceIDs
+                let fragments = MindMapBatcher.fragments(entries.filter { !mapped.contains($0.id) })
+                guard !fragments.isEmpty else { completed = true; return }
+                if activeService == nil {
+                    let engine = self.makeService()
+                    activeService = engine; self.service = engine
+                    self.backendDescription = engine.backendDescription
+                    self.progress = "正在准备脑图服务…"
+                    let started = ContinuousClock.now
+                    let ticker = Task { [weak self] in
+                        while !Task.isCancelled {
+                            do { try await Task.sleep(for: .seconds(1)) } catch { return }
+                            guard !Task.isCancelled, let self, self.generation == requestedGeneration else { return }
+                            self.backendDescription = engine.backendDescription
+                            self.progress = "正在准备脑图服务 · \(started.duration(to: .now).components.seconds) 秒"
                         }
-                        do { try await engine.prepare() }
-                        catch { ticker.cancel(); throw error }
-                        ticker.cancel()
                     }
-                    guard let engine = activeService else { throw SummaryError.modelUnavailable }
-                    for (index, batch) in batches.enumerated() {
-                        try Task.checkCancellation()
-                        guard self.generation == requestedGeneration else { return }
-                        self.progress = "正在补充话题 \(index + 1)/\(batches.count)…"
-                        let baseline = result
-                        let correctedSources = Set(batch.records.map(\.sourceID)).intersection(affected)
-                        let linked = previousMap.topicIDs(for: correctedSources)
-                        let additions = try await engine.summarize(batch.input, previous: baseline.context(for: batch.input, including: linked), validating: { output in
-                            _ = try baseline.adding(output, batch: batch)
+                    do { try await engine.prepare() }
+                    catch { ticker.cancel(); throw error }
+                    ticker.cancel()
+                }
+                guard let engine = activeService else { throw SummaryError.modelUnavailable }
+                var remaining = fragments[...]
+                var round = 0
+                while !remaining.isEmpty {
+                    try Task.checkCancellation()
+                    guard self.generation == requestedGeneration else { return }
+                    let batch = MindMapBatcher.batch(remaining, budget: engine.inputBudget)
+                    round += 1
+                    let left = remaining.reduce(0) { $0 + $1.text.count }
+                    let rounds = round - 1 + Int((Double(left) / Double(max(1, engine.inputBudget))).rounded(.up))
+                    let label = rounds > 1 ? "正在整理第 \(round)/\(rounds) 段" : "正在整理新内容"
+                    self.progress = label + "…"
+                    let minutes = Int(self.now().timeIntervalSince(self.sessionStartedAt) / 60)
+                    let limits = MindMapLimits.forSession(minutes: minutes, local: engine.usesLocalModel)
+                    let baseline = self.map
+                    let request = MindMapRequest(map: baseline.hasContent ? baseline.modelContext : "[]",
+                        previousTail: self.previousTail,
+                        newText: batch.map(\.text).joined(separator: "\n"),
+                        limits: limits, sessionMinutes: minutes)
+                    let output: String
+                    do {
+                        output = try await engine.summarize(request, validating: { value in
+                            _ = try baseline.applying(value, limits: limits)
                         }) { [weak self] partial in
                             guard let self, self.generation == requestedGeneration, !Task.isCancelled else { return }
                             self.backendDescription = engine.backendDescription
-                            if partial.isEmpty { self.draftMap = baseline; self.draftText = baseline.outline; return }
-                            if let preview = try? baseline.adding(partial, batch: batch, isDraft: true) {
-                                let outline = preview.outline
-                                if outline != self.draftText {
-                                    self.draftMap = preview; self.draftText = outline
-                                }
-                            }
+                            if !partial.isEmpty { self.progress = label + " · 已生成 \(partial.count) 字" }
                         }
-                        try Task.checkCancellation()
-                        guard self.generation == requestedGeneration else { return }
-                        self.backendDescription = engine.backendDescription
-                        result = try baseline.adding(additions, batch: batch)
-                        self.draftMap = result; self.draftText = result.outline
+                    } catch SummaryError.retryWithLocalBudget {
+                        round -= 1
+                        continue
                     }
+                    try Task.checkCancellation()
+                    guard self.generation == requestedGeneration else { return }
+                    self.backendDescription = engine.backendDescription
+                    let revision = try baseline.applying(output, limits: limits)
+                    // Commit each merged batch, so a long catch-up shows its
+                    // first map after one request instead of after all of them.
+                    self.map = revision.map
+                    if !revision.changedTopicIDs.isEmpty { self.recentlyChangedTopicIDs = revision.changedTopicIDs }
+                    for fragment in batch where fragment.completesSource { self.mappedSourceIDs.insert(fragment.sourceID) }
+                    self.previousTail = String(request.newText.suffix(240))
+                    self.coveredCount = self.mappedSourceIDs.count
+                    self.completedAt = self.now()
+                    remaining = remaining[batch.endIndex...]
                 }
-                try Task.checkCancellation()
-                guard self.generation == requestedGeneration else { return }
-                result.pruneEmptyTopics()
-                self.map = result; self.sourceKeys = keys
-                self.coveredCount = captionCount; self.completedAt = .now
-                self.completedSourceRevision = sourceRevision
+                completed = true
             } catch is CancellationError { return }
             catch {
                 guard self.generation == requestedGeneration, !Task.isCancelled else { return }
-                self.isAutoUpdating = false; self.pending = nil
-                self.errorMessage = (error as? LocalizedError)?.errorDescription ?? "总结暂时未能完成，点击重试。"
+                self.isAutoUpdating = false
+                self.errorMessage = (error as? LocalizedError)?.errorDescription ?? "脑图暂时未能更新，点击重试。"
             }
         }
     }

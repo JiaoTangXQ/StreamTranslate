@@ -4,7 +4,6 @@ import SwiftUI
 /// close, pause and the window lifecycle do that.
 struct ConversationSummaryView: View {
     @Environment(CaptionViewModel.self) private var viewModel
-    @Environment(CaptionSettings.self) private var settings
     @State private var copied = false
     @State private var viewportHeight: CGFloat = 0
     @State private var exportError: String?
@@ -37,12 +36,12 @@ struct ConversationSummaryView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     if summary.map.hasContent {
-                        ConversationMindMapView(map: summary.map, overviewOnly: viewportHeight < 300)
+                        ConversationMindMapView(map: summary.map, activeTopicIDs: summary.recentlyChangedTopicIDs,
+                                                overviewOnly: viewportHeight < 300)
                     } else {
                         VStack(alignment: .leading, spacing: 9) {
-                            Text(summary.isGenerating ? "正在梳理主题与分支" : "先听一段，再看脑图")
-                                .font(.system(size: 15, weight: .medium))
-                            Text("展开分支看短节点，点击节点看说明；完整字幕在历史记录中。")
+                            Text(emptyTitle).font(.system(size: 15, weight: .medium))
+                            Text("脑图会随对话不断合并、修正：前后讲到的同一件事会整合在一起。完整字幕在历史记录中。")
                                 .font(.system(size: 13)).lineSpacing(5)
                                 .foregroundStyle(CaptionWorkspaceStyle.secondary)
                         }
@@ -59,10 +58,6 @@ struct ConversationSummaryView: View {
         }
         .foregroundStyle(CaptionWorkspaceStyle.foreground)
         .background(CaptionWorkspaceStyle.sidebar)
-        .onAppear { summary.configuredUpdateDelay = settings.summaryUpdateInterval.duration }
-        .onChange(of: settings.summaryUpdateInterval) { _, interval in
-            summary.configuredUpdateDelay = interval.duration
-        }
         .onChange(of: summary.completedAt) { copied = false }
         .onKeyPress(.escape) { summary.collapse(); return .handled }
         .alert("导出失败", isPresented: Binding(
@@ -73,6 +68,12 @@ struct ConversationSummaryView: View {
         } message: {
             Text(exportError ?? "无法导出当前脑图。")
         }
+    }
+
+    private var emptyTitle: String {
+        if summary.isGenerating { return "正在生成第一版脑图…" }
+        if viewModel.captionHistory.isEmpty { return "开始收听后，几句话就会出现第一版脑图" }
+        return summary.isAutoUpdating ? "内容再多一点就开始整理" : "自动整理已暂停"
     }
 
     private var mindMapExportMenu: some View {
@@ -109,46 +110,51 @@ struct ConversationSummaryView: View {
         }
     }
 
-    private var statusBar: some View {
-        @Bindable var settings = settings
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .center, spacing: 12) {
-                if let error = summary.errorMessage {
-                    Label(error, systemImage: "exclamationmark.circle")
-                        .font(.system(size: 12)).lineLimit(3)
-                        .foregroundStyle(CaptionWorkspaceStyle.foreground)
-                } else {
-                    HStack(spacing: 7) {
-                        if summary.isGenerating { ProgressView().controlSize(.mini) }
-                        Text(summary.isGenerating ? "整理完成后一起更新" : summary.isAutoUpdating ? settings.summaryUpdateInterval.summaryDescription : "自动整理已暂停")
-                        Spacer(minLength: 0)
-                    }
-                    .font(.system(size: 11)).foregroundStyle(CaptionWorkspaceStyle.secondary)
-                }
-                if summary.errorMessage == nil {
-                    SummaryIntervalPicker(selection: $settings.summaryUpdateInterval, compact: true)
-                        .help("调整脑图自动整理间隔")
-                }
+    private var statusLine: some View {
+        TimelineView(.periodic(from: .now, by: 20)) { context in
+            HStack(spacing: 7) {
+                if summary.isGenerating { ProgressView().controlSize(.mini) }
+                Text(statusText(at: context.date)).lineLimit(2)
+                Spacer(minLength: 0)
             }
-            if summary.errorMessage == nil {
-                HStack {
-                    Text("滚轮可选择整理间隔")
-                        .font(.system(size: 10)).foregroundStyle(CaptionWorkspaceStyle.secondary)
-                    Spacer(minLength: 0)
-                }
+            .font(.system(size: 11)).foregroundStyle(CaptionWorkspaceStyle.secondary)
+        }
+    }
+
+    private func statusText(at date: Date) -> String {
+        if summary.isGenerating { return summary.progress.isEmpty ? "正在整理…" : summary.progress }
+        if !summary.isAutoUpdating { return "自动整理已暂停" }
+        var parts: [String] = []
+        if let completed = summary.completedAt {
+            let seconds = max(0, Int(date.timeIntervalSince(completed)))
+            parts.append(seconds < 60 ? "刚刚更新" : "\(seconds / 60) 分钟前更新")
+        }
+        parts.append(summary.pendingCharacters > 0 ? "新内容会自动合并" : "已包含全部字幕")
+        return parts.joined(separator: " · ")
+    }
+
+    private var statusBar: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let error = summary.errorMessage {
+                Label(error, systemImage: "exclamationmark.circle")
+                    .font(.system(size: 12)).lineLimit(3)
+                    .foregroundStyle(CaptionWorkspaceStyle.foreground)
+            } else {
+                statusLine
             }
             HStack(spacing: 8) {
-                Button(summary.errorMessage != nil ? "重试" : "整理一次") {
+                Button(summary.errorMessage != nil ? "重试" : "立即整理") {
                     if summary.errorMessage != nil { viewModel.resumeConversationSummary() }
                     else { viewModel.requestConversationSummary() }
                 }
-                    .disabled(summary.isGenerating)
+                .disabled(summary.isGenerating)
+                .help("马上把还没整理的字幕合并进脑图")
                 Button(summary.isAutoUpdating ? "暂停" : "继续") {
                     if summary.isAutoUpdating { summary.pauseAutomaticUpdates() }
                     else { viewModel.resumeConversationSummary() }
                 }
                 Spacer(minLength: 0)
-                Text("AI 可能有遗漏").font(.system(size: 10)).foregroundStyle(CaptionWorkspaceStyle.secondary)
+                Text("AI 整理，可能有遗漏").font(.system(size: 10)).foregroundStyle(CaptionWorkspaceStyle.secondary)
             }
             .buttonStyle(.bordered).controlSize(.small)
         }

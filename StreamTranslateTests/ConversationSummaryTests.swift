@@ -2,400 +2,445 @@ import Foundation
 import Testing
 @testable import StreamTranslate
 
-@MainActor private final class SummaryStub: ConversationSummaryProviding {
+// MARK: - Fixtures
+
+private let wide = MindMapLimits.forSession(minutes: 5, local: false)
+
+private func revision(_ topics: [[String: Any]], remove: [String] = []) -> String {
+    String(decoding: try! JSONSerialization.data(withJSONObject: ["topics": topics, "remove": remove]), as: UTF8.self)
+}
+
+private func topic(_ id: String, _ title: String, summary: String = "", kind: String = "discussion",
+                   _ branches: [(String, [String])]) -> [String: Any] {
+    ["id": id, "kind": kind, "title": title, "summary": summary,
+     "branches": branches.map { ["title": $0.0, "points": $0.1.map { ["text": $0, "detail": ""] }] }]
+}
+
+/// Responds with one topic that keeps the existing T1 when the map has one,
+/// so repeated updates rewrite instead of append.
+@MainActor private final class MapStub: ConversationSummaryProviding {
     var prepared = 0
     var cancelled = false
-    var requests: [(String, String)] = []
+    var requests: [MindMapRequest] = []
     var fails = false
     var delay: Duration = .zero
+    var budget = 6_000
+    var local = false
     var activeRequests = 0
     var maximumActiveRequests = 0
+    var inputBudget: Int { budget }
+    var usesLocalModel: Bool { local }
+    var backendDescription: String { "AI 脑图 · 测试" }
     func prepare() async throws { prepared += 1 }
-    func summarize(_ text: String, previous: String, onUpdate: @escaping @MainActor (String) -> Void) async throws -> String {
-        requests.append((text, previous))
+    func summarize(_ request: MindMapRequest, onUpdate: @escaping @MainActor (String) -> Void) async throws -> String {
+        requests.append(request)
         activeRequests += 1; maximumActiveRequests = max(maximumActiveRequests, activeRequests)
         defer { activeRequests -= 1 }
-        let response = #"{"topic":"new:1","kind":"discussion","title":"软件使用","branch":"字幕","text":"保留100条，完整记录本地保存。","sources":[1]}"#
-        onUpdate(response)
+        onUpdate("{\"topics\":[")
         if delay > .zero { try? await Task.sleep(for: delay) }
-        onUpdate(response)
         if fails { throw SummaryError.invalidResult }
-        return response
+        let id = request.map.contains("\"id\":\"T1\"") ? "T1" : ""
+        let last = request.newText.components(separatedBy: "\n").last ?? ""
+        return revision([topic(id, "会议记录", summary: "第\(requests.count)次整理",
+                               [("内容", [String(last.prefix(30))])])])
     }
     func cancel() { cancelled = true }
 }
 
-private func summaryEntries(_ count: Int) -> [CaptionEntry] {
-    (0..<count).map { CaptionEntry(timestamp: .now,
-        englishText: "Topic \($0): discuss the meeting and keep the full record.", chineseText: "") }
+private func entries(_ texts: [String]) -> [CaptionEntry] {
+    texts.map { CaptionEntry(timestamp: .now, englishText: $0, chineseText: "") }
 }
 
-@MainActor private final class SummaryPatchStub: ConversationSummaryProviding {
-    var responses: [String]
-    var inputs: [String] = []
-    init(_ responses: [String]) { self.responses = responses }
-    func prepare() async throws {}
-    func cancel() {}
-    func summarize(_ text: String, previous: String, onUpdate: @escaping @MainActor (String) -> Void) async throws -> String {
-        inputs.append(text)
-        let result = responses.removeFirst()
-        onUpdate(result)
-        return result
-    }
-}
-
-@Test @MainActor func summaryAppendsIndependentSubjectsWithoutReplacingEarlierText() async {
-    let engine = SummaryPatchStub([
-        #"{"topic":"new:1","kind":"advertisement","title":"耳机赞助","branch":"优惠","text":"使用优惠码可享折扣。","sources":[1]}"#,
-        #"{"topic":"new:1","kind":"discussion","title":"记忆形成","branch":"机制","text":"海马体参与记忆形成。","sources":[1]}"#
-    ])
-    let model = ConversationSummaryModel { engine }
-    var entries = [CaptionEntry(timestamp: .now, englishText: "Today's sponsor is a headphone company. Use our promo code.", chineseText: "")]
-    let first = entries
-    model.generate(sourceRevision: 1) { first }
-    await waitForSummary(model)
-    let advertisement = model.text
-    entries.append(CaptionEntry(timestamp: .now, englishText: "The ad is over. Our topic today is how the hippocampus forms memories.", chineseText: ""))
-    let second = entries
-    model.generate(sourceRevision: 2) { second }
-    await waitForSummary(model)
-    #expect(model.text.hasPrefix(advertisement))
-    #expect(model.text.contains("耳机赞助"))
-    #expect(model.text.contains("记忆形成"))
-    #expect(model.map.topics.map(\.kind) == [.advertisement, .discussion])
-    #expect(model.map.topics[0].id == "T1")
-    #expect(model.map.topics[1].id == "T2")
-}
-
-private func topicBatch(_ count: Int = 1) -> SummaryBatch {
-    SummaryBatch(records: (0..<count).map { .init(sourceID: UUID(), text: "Record \($0 + 1)\n") })
-}
-
-@Test func topicAdditionsPreserveIDsTitlesOrderAndSeparateAdsEvenWithWrongTarget() throws {
-    let batch = topicBatch()
-    let first = try ConversationMindMap().adding(#"{"topic":"new:1","kind":"advertisement","title":"耳机赞助","branch":"优惠","text":"有优惠码。","sources":[1]}"#, batch: batch)
-    let ad = first.topics[0]
-    let second = try first.adding(#"{"topic":"T1","kind":"discussion","title":"记忆形成","branch":"机制","text":"海马体参与记忆。","sources":[1]}"#, batch: batch)
-    #expect(second.topics.count == 2)
-    #expect(second.topics[0] == ad)
-    let updated = try second.adding(#"{"topic":"T2","kind":"discussion","title":"禁止重命名旧主题","branch":"B1","text":"睡眠有助于巩固记忆。","sources":[1]}"#, batch: batch)
-    #expect(updated.topics.map(\.title) == ["耳机赞助", "记忆形成"])
-    #expect(updated.topics[1].branches[0].points[0] == second.topics[1].branches[0].points[0])
-    #expect(updated.topics[1].branches[0].points.count == 2)
-}
-
-@Test func topicForestKeepsDistinctEventsAndReturnsToExistingTopicWithoutGlobalRegrouping() throws {
-    let batch = topicBatch()
-    var map = ConversationMindMap()
-    for index in 0..<8 {
-        let output = "{\"topic\":\"new:1\",\"kind\":\"discussion\",\"title\":\"事件\(index)\",\"branch\":\"进展\",\"text\":\"独立事实\(index)。\",\"sources\":[1]}"
-        map = try map.adding(output, batch: batch)
-    }
-    let previous = map.topics
-    map = try map.adding(#"{"topic":"T2","kind":"discussion","branch":"B1","text":"后续决定：继续调查。","sources":[1]}"#, batch: batch)
-    #expect(map.topics.count == 8)
-    #expect(map.topics[0] == previous[0])
-    #expect(map.topics[2...] == previous[2...])
-    #expect(map.topics[1].id == previous[1].id)
-    #expect(map.topics[1].branches[0].points.count == 2)
-    #expect(map.context(limit: 200).count <= 200)
-}
-
-@Test func duplicateFactForAnExistingTopicMergesEvidenceWithoutChangingNodeIdentity() throws {
-    let batch = topicBatch(2)
-    let line = #"{"topic":"new:1","kind":"discussion","title":"睡眠","branch":"作用","text":"睡眠巩固记忆。","sources":[1]}"#
-    let original = try ConversationMindMap().adding(line, batch: batch)
-    let next = try original.adding(line.replacingOccurrences(of: "[1]", with: "[2]").replacingOccurrences(of: "new:1", with: "T1"), batch: batch)
-    #expect(next.topics.count == 1)
-    #expect(next.topics[0].branches[0].points.count == 1)
-    #expect(next.topics[0].branches[0].points[0].id == original.topics[0].branches[0].points[0].id)
-    #expect(next.topics[0].branches[0].points[0].sources == Set(batch.records.map(\.sourceID)))
-}
-
-@Test func topicDraftUsesOnlyCompleteOperationsAndInvalidOutputCannotReplaceMap() throws {
-    let batch = topicBatch()
-    let valid = #"{"topic":"new:1","kind":"discussion","title":"记忆","branch":"机制","text":"海马体参与记忆。","sources":[1]}"#
-    let draft = valid + "\n{\"topic\":\"new:2\",\"text\":\"未结束"
-    #expect(try ConversationMindMap().adding(draft, batch: batch, isDraft: true).topics.count == 1)
-    #expect(throws: SummaryError.self) { try ConversationMindMap().adding(draft, batch: batch) }
-    #expect(throws: SummaryError.self) { try ConversationMindMap().adding(valid.replacingOccurrences(of: "[1]", with: "[9]"), batch: batch) }
-    #expect(throws: SummaryError.self) { try ConversationMindMap().adding("主题：不能整图替换", batch: batch) }
-    #expect(try ConversationMindMap().adding("[]", batch: batch).topics.isEmpty)
-}
-
-@Test func sourceCorrectionInvalidatesOnlyDependentFactsAndRetainsOtherTopics() throws {
-    let batch = topicBatch(3)
-    let output = #"{"topic":"new:1","kind":"advertisement","title":"赞助","branch":"优惠","text":"赞助优惠。","sources":[1]}"# + "\n"
-        + #"{"topic":"new:2","kind":"discussion","title":"记忆","branch":"机制","text":"两句共同支持的记忆事实。","sources":[2,3]}"#
-    var map = try ConversationMindMap().adding(output, batch: batch)
-    let ad = map.topics[0]
-    let affected = map.dependentSources(of: [batch.records[1].sourceID])
-    #expect(affected == Set(batch.records.dropFirst().map(\.sourceID)))
-    map.invalidate(sources: affected)
-    #expect(map.topics[0] == ad)
-    #expect(map.topics[1].branches[0].points.isEmpty)
-    let repaired = try map.adding(#"{"topic":"T2","kind":"discussion","branch":"B1","text":"更正后的记忆事实。","sources":[2,3]}"#, batch: batch)
-    #expect(repaired.topics[0] == ad)
-    #expect(repaired.topics[1].id == "T2")
-    #expect(repaired.topics[1].branches[0].id == "B1")
-}
-
-@Test @MainActor func correctingOneCaptionKeepsOtherTopicNodesAndDoesNotReplayTheirText() async {
-    let engine = SummaryPatchStub([
-        #"{"topic":"new:1","kind":"advertisement","title":"赞助","branch":"优惠","text":"赞助优惠。","sources":[1]}"# + "\n"
-            + #"{"topic":"new:2","kind":"discussion","title":"记忆","branch":"机制","text":"旧识别结果。","sources":[2]}"#,
-        #"{"topic":"new:1","kind":"discussion","title":"住房政策","branch":"状态","text":"尚未表决。","sources":[1]}"#,
-        #"{"topic":"T2","kind":"discussion","branch":"B1","text":"更正后的识别结果。","sources":[1]}"#
-    ])
-    let model = ConversationSummaryModel { engine }
-    let ad = CaptionEntry(timestamp: .now, englishText: "Sponsor advertisement", chineseText: "")
-    let core = CaptionEntry(timestamp: .now, englishText: "Old recognition", chineseText: "")
-    model.generate(sourceRevision: 1) { [ad, core] }
-    await waitForSummary(model)
-    let housing = CaptionEntry(timestamp: .now, englishText: "Housing policy not yet passed", chineseText: "")
-    model.generate(sourceRevision: 2) { [ad, core, housing] }
-    await waitForSummary(model)
-    let unchanged = [model.map.topics[0], model.map.topics[2]]
-    let corrected = CaptionEntry(id: core.id, timestamp: core.timestamp, englishText: "Corrected recognition", chineseText: "")
-    model.generate(sourceRevision: 3) { [ad, corrected, housing] }
-    await waitForSummary(model)
-    #expect(engine.inputs.last == "[1] Corrected recognition\n")
-    #expect([model.map.topics[0], model.map.topics[2]] == unchanged)
-    #expect(model.map.topics[1].id == "T2")
-    #expect(!model.text.contains("旧识别结果"))
-    #expect(model.coveredCount == 3)
-}
-
-@Test func duplicateDetectionPreservesNegativeNumbersAndWordBoundaries() throws {
-    let batch = topicBatch()
-    let first = #"{"topic":"new:1","kind":"discussion","title":"数值","branch":"记录","text":"Temperature -1.","sources":[1]}"#
-    let map = try ConversationMindMap().adding(first, batch: batch)
-    let next = try map.adding(first.replacingOccurrences(of: "-1.", with: "1.").replacingOccurrences(of: "new:1", with: "T1"), batch: batch)
-    #expect(next.topics[0].branches[0].points.count == 2)
-}
-
-@Test func distinctNewEventsWithTheSameTitleRemainSeparateRoots() throws {
-    let batch = topicBatch(2)
-    let operations = #"{"topic":"new:1","kind":"discussion","title":"住房政策","branch":"北京","text":"北京讨论租金规则。","sources":[1]}"# + "\n"
-        + #"{"topic":"new:2","kind":"discussion","title":"住房政策","branch":"上海","text":"上海讨论住房供给。","sources":[2]}"#
-    let map = try ConversationMindMap().adding(operations, batch: batch)
-    #expect(map.topics.count == 2)
-    #expect(map.topics.map(\.id) == ["T1", "T2"])
-}
-
-@Test func otherwiseValidFactWithEmptyBranchUsesNeutralPointsLabel() throws {
-    let map = try ConversationMindMap().adding(#"{"topic":"new:1","kind":"advertisement","title":"耳机赞助","branch":"","text":"输入优惠码可享折扣。","sources":[1]}"#, batch: topicBatch())
-    #expect(map.topics[0].branches[0].title == "要点")
-    #expect(map.topics[0].branches[0].points[0].text == "输入优惠码可享折扣。")
-    let spaced = try ConversationMindMap().adding(#"{"topic":"new:1","kind":"discussion","title":"记忆","branch":" 机制 ","text":"海马体参与记忆。","sources":[1]}"#, batch: topicBatch())
-    #expect(spaced.topics[0].branches[0].title == "机制")
-}
-
-@Test func conflictingNewAliasTitlesAndMalformedAliasesCannotRegroupFacts() throws {
-    let batch = topicBatch(2)
-    let first = #"{"topic":"new:1","kind":"discussion","title":"北京住房政策","branch":"状态","text":"北京讨论租金规则。","sources":[1]}"#
-    let other = #"{"topic":"new:1","kind":"discussion","title":"上海住房政策","branch":"状态","text":"上海讨论住房供给。","sources":[2]}"#
-    #expect(throws: SummaryError.self) { try ConversationMindMap().adding(first + "\n" + other, batch: batch) }
-    #expect(throws: SummaryError.self) { try ConversationMindMap().adding(first.replacingOccurrences(of: "new:1", with: "new:或1"), batch: batch) }
-}
-
-@Test func routingIndexProvidesReadOnlyNodesForDeduplication() throws {
-    let map = try ConversationMindMap().adding(#"{"topic":"new:1","kind":"advertisement","title":"耳机赞助","branch":"优惠","text":"输入优惠码可享九折。","sources":[1]}"#, batch: topicBatch())
-    let index = map.context(for: "耳机优惠")
-    #expect(index.contains("T1|advertisement|耳机赞助"))
-    #expect(index.contains("B1|优惠"))
-    #expect(index.contains("P1|"))
-    #expect(index.contains("输入优惠码可享九折"))
-}
-
-@Test func mindMapRepeatedParaphraseReusesNodeAndPreservesEvidenceAndIdentity() throws {
-    let first = topicBatch(), repeated = topicBatch()
-    let map = try ConversationMindMap().adding(#"{"topic":"new:1","kind":"discussion","title":"编程AI的条件","branch":"训练数据","text":"充足代码数据是训练前提","detail":"少数组织拥有足够的代码训练数据。","match":"","sources":[1]}"#, batch: first)
-    let next = try map.adding(#"{"topic":"T1","kind":"discussion","title":"编程AI的条件","branch":"B1","text":"训练离不开充足的代码数据","detail":"这个观点只是再次提到。","match":"P1","sources":[1]}"#, batch: repeated)
-    #expect(next.topics[0].branches[0].points.count == 1)
-    #expect(next.topics[0].branches[0].points[0].id == map.topics[0].branches[0].points[0].id)
-    #expect(next.topics[0].branches[0].points[0].text == "充足代码数据是训练前提")
-    #expect(next.topics[0].branches[0].points[0].sources == Set((first.records + repeated.records).map(\.sourceID)))
-    #expect(next.outline.contains("少数组织拥有足够"))
-    #expect(!next.outline.contains("只是再次提到"))
-    let byName = try map.adding(#"{"topic":"T1","kind":"discussion","branch":"训练数据","text":"训练需要充足代码数据","match":"P1","sources":[1]}"#, batch: repeated)
-    #expect(byName.topics[0].branches[0].points.count == 1)
-    #expect(byName.topics[0].branches[0].points[0].id == map.topics[0].branches[0].points[0].id)
-}
-
-@Test func mindMapMatchCannotReferenceNewOrMissingNodes() throws {
-    let map = try ConversationMindMap().adding(#"{"topic":"new:1","kind":"discussion","title":"编程AI","branch":"数据","text":"代码数据决定训练基础","sources":[1]}"#, batch: topicBatch())
-    for (topic, branch, match) in [("T1", "B1", "P2"), ("T1", "新分支", "P1"), ("new:1", "数据", "P1"), ("T1", "B1", "P0")] {
-        let data = try JSONSerialization.data(withJSONObject: ["topic": topic, "kind": "discussion", "title": "编程AI", "branch": branch, "text": "代码数据是前提", "match": match, "sources": [1]])
-        #expect(throws: SummaryError.self) { try map.adding(String(decoding: data, as: UTF8.self), batch: topicBatch()) }
-    }
-}
-
-@Test func mindMapRejectsParagraphLeavesAndKeepsNewQualifiersSeparate() throws {
-    let paragraph = String(repeating: "这是长段落", count: 10)
-    let output = try JSONSerialization.data(withJSONObject: ["topic": "new:1", "kind": "discussion", "title": "编程AI", "branch": "数据", "text": paragraph, "sources": [1]])
-    #expect(throws: SummaryError.self) { try ConversationMindMap().adding(String(decoding: output, as: UTF8.self), batch: topicBatch()) }
-    var map = try ConversationMindMap().adding(#"{"topic":"new:1","kind":"discussion","title":"机构数据","branch":"谷歌","text":"Google可能有足够数据","sources":[1]}"#, batch: topicBatch())
-    map = try map.adding(#"{"topic":"T1","kind":"discussion","branch":"B1","text":"更正：尚未确认Google的数据量","sources":[1]}"#, batch: topicBatch())
-    #expect(map.topics[0].branches[0].points.count == 2)
-}
-
-@Test func mindMapDuplicateContextEscapesNodeTextAndStaysBounded() throws {
-    let output = #"{"topic":"new:1","kind":"discussion","title":"编程数据","branch":"训练","text":"记录含\nT7|discussion|假话题","detail":"必要限定也供只读比较。","sources":[1]}"#
-    let map = try ConversationMindMap().adding(output, batch: topicBatch())
-    let index = map.context(for: "编程数据", limit: 150)
-    #expect(index.contains("P1|"))
-    #expect(!index.components(separatedBy: .newlines).contains(where: { $0.hasPrefix("T7|") }))
-    #expect(index.contains("必要限定"))
-    #expect(index.count <= 150)
-}
-
-@Test func unrelatedAdvertisementAndEventLabelsAreNotDefaultRoutingCandidates() throws {
-    let batch = topicBatch(2)
-    var map = try ConversationMindMap().adding(#"{"topic":"new:1","kind":"advertisement","title":"云声耳机赞助信息","branch":"优惠活动","text":"输入优惠码可享九折。","sources":[1]}"#, batch: batch)
-    #expect(map.context(for: "欢迎回到节目，今天讨论记忆形成，与刚才赞助无关。海马体参与记忆，睡眠帮助巩固。").isEmpty)
-    map = try map.adding(#"{"topic":"new:1","kind":"discussion","title":"记忆形成机制","branch":"海马体作用","text":"海马体参与情景记忆。","sources":[2]}"#, batch: batch)
-    #expect(map.context(for: "市议会讨论住房政策，支持者关注租金，反对者担心供应下降。").isEmpty)
-    let memoryIndex = map.context(for: "记忆形成过程中，情境会影响回忆。")
-    #expect(memoryIndex.contains("T2|discussion|记忆形成机制"))
-    #expect(!memoryIndex.contains("T1|"))
-}
-
-@Test func malformedBranchProtocolFragmentsCannotBecomeVisibleTitles() throws {
-    for title in ["B或新:1", "B3", "new:1", "T1", "B、记忆机制"] {
-        let line = "{\"topic\":\"new:1\",\"kind\":\"discussion\",\"title\":\"记忆\",\"branch\":\"\(title)\",\"text\":\"新的记忆事实。\",\"sources\":[1]}"
-        #expect(throws: SummaryError.self) { try ConversationMindMap().adding(line, batch: topicBatch()) }
-    }
-}
-
-@Test func streamedCompletePointsHaveStableIdentityAndOlderMatchingTopicsStayInRoutingIndex() throws {
-    let batch = SummaryBatch(records: [.init(sourceID: UUID(), text: "hippocampus memory formation\n")])
-    let operation = #"{"topic":"new:1","kind":"discussion","title":"记忆","branch":"机制","text":"海马体参与记忆。","sources":[1]}"#
-    let firstPreview = try ConversationMindMap().adding(operation, batch: batch, isDraft: true)
-    let nextPreview = try ConversationMindMap().adding(operation + "\n{", batch: batch, isDraft: true)
-    #expect(firstPreview.topics[0].branches[0].points[0].id == nextPreview.topics[0].branches[0].points[0].id)
-    var map = firstPreview
-    for index in 0..<30 {
-        let other = topicBatch()
-        let line = "{\"topic\":\"new:1\",\"kind\":\"discussion\",\"title\":\"独立事件\(index)\",\"branch\":\"近况\",\"text\":\"新的事件内容。\",\"sources\":[1]}"
-        map = try map.adding(line, batch: other)
-    }
-    let index = map.context(for: "Return to hippocampus memory formation", limit: 200)
-    #expect(index.contains("T1|discussion|记忆"))
-    #expect(index.count <= 200)
-}
-
-@MainActor private func waitForSummary(_ model: ConversationSummaryModel) async {
-    for _ in 0..<400 {
-        if !model.isGenerating { return }
+@MainActor private func waitUntilIdle(_ model: ConversationSummaryModel, timeout: Int = 800) async {
+    for _ in 0..<timeout {
+        if !model.isGenerating && !model.isUpdateScheduled { return }
         try? await Task.sleep(for: .milliseconds(5))
     }
-    Issue.record("Summary fixture did not complete")
-    model.cancel()
+    Issue.record("Mind map did not settle")
 }
 
-@Test func summaryChunksCoverEveryCharacterWithoutOversizedRequests() {
-    let entries = [CaptionEntry(timestamp: .now, englishText: String(repeating: "中🙂A", count: 900), chineseText: ""),
-                   CaptionEntry(timestamp: .now, englishText: "Last topic", chineseText: "")]
-    let batches = SummaryTranscript.batches(entries)
-    #expect(batches.allSatisfy { $0.records.map(\.text).joined().count <= 1_200 && $0.records.count <= 12 })
-    #expect(batches.flatMap(\.records).map(\.text).joined() == entries.map { $0.originalText + "\n" }.joined())
+@MainActor private func waitFor(_ condition: () -> Bool) async {
+    for _ in 0..<400 {
+        if condition() { return }
+        try? await Task.sleep(for: .milliseconds(5))
+    }
 }
 
-@Test @MainActor func collapsedSummaryDoesNotLoadAModel() {
-    let engine = SummaryStub()
+// MARK: - Revisions
+
+@Test func mindMapRevisionRewritesAContinuingTopicInPlaceAndAppendsNewOnes() throws {
+    let first = try ConversationMindMap().applying(revision([
+        topic("", "新版发布", [("时间", ["下周发布"])]),
+        topic("", "招聘计划", [("岗位", ["招两名后端"])])
+    ]), limits: wide)
+    #expect(first.map.topics.map(\.id) == ["T1", "T2"])
+    #expect(first.changedTopicIDs == ["T1", "T2"])
+    // The second half of the release story arrives later and corrects the date.
+    let second = try first.map.applying(revision([
+        topic("T1", "新版发布", summary: "推迟到月底，先修性能", [("时间", ["推迟到月底发布"]), ("原因", ["性能问题未解决"])]),
+        topic("", "预算", [("结论", ["预算不变"])])
+    ]), limits: wide)
+    #expect(second.map.topics.map(\.id) == ["T1", "T2", "T3"])
+    #expect(second.map.topics[0].branches.map(\.title) == ["时间", "原因"])
+    #expect(second.map.topics[0].branches[0].points.map(\.text) == ["推迟到月底发布"])
+    #expect(second.map.topics[0].summary == "推迟到月底，先修性能")
+    // Untouched topics keep their content and identity.
+    #expect(second.map.topics[1] == first.map.topics[1])
+    #expect(second.changedTopicIDs == ["T1", "T3"])
+}
+
+@Test func mindMapMergeKeepsOneIDAndRemovesAbsorbedTopics() throws {
+    let start = try ConversationMindMap().applying(revision([
+        topic("", "延迟问题", [("现象", ["字幕卡顿"])]),
+        topic("", "识别引擎", [("选择", ["Whisper 分段"])]),
+        topic("", "午餐", [("安排", ["十二点订餐"])])
+    ]), limits: wide).map
+    let merged = try start.applying(revision([
+        topic("T1", "字幕卡顿与识别引擎", [("原因", ["Whisper 分段重复识别"]), ("方案", ["改用流式识别"])])
+    ], remove: ["T2", "T9"]), limits: wide)
+    #expect(merged.map.topics.map(\.id) == ["T1", "T3"])
+    #expect(merged.map.topics[0].title == "字幕卡顿与识别引擎")
+    // A topic that is both rewritten and listed for removal is kept.
+    let kept = try merged.map.applying(revision([topic("T3", "午餐", [("安排", ["改到一点"])])], remove: ["T3"]), limits: wide)
+    #expect(kept.map.topics.map(\.id) == ["T1", "T3"])
+    // Removing topics without rewriting an existing one is not a merge:
+    // they are folded into the overview instead of disappearing.
+    let bare = try kept.map.applying(revision([topic("", "新话题", [("甲", ["一"])])], remove: ["T1", "T3"]), limits: wide).map
+    #expect(bare.topics.map(\.title) == [ConversationMindMap.archiveTitle, "新话题"])
+    #expect(bare.topics[0].branches[0].points.count == 2)
+}
+
+@Test func mindMapClipsOversizedOutputInsteadOfDiscardingTheUpdate() throws {
+    let limits = MindMapLimits(topics: 2, branchesPerTopic: 2, pointsPerBranch: 2)
+    let long = String(repeating: "很长的节点", count: 20)
+    let result = try ConversationMindMap().applying(revision([
+        topic("", "第一个主题", [("甲", [long, "二", "三"]), ("乙", ["一"]), ("丙", ["一"])]),
+        topic("", "第二个主题", [("甲", ["一"])]),
+        topic("", "第三个主题", [("甲", ["一"])])
+    ]), limits: limits).map
+    #expect(result.topics.count == 2)
+    #expect(result.topics[0].branches.count == 2)
+    #expect(result.topics[0].branches[0].points.count == 2)
+    let clipped = result.topics[0].branches[0].points[0].text
+    #expect(clipped.count == MindMapLimits.pointLength && clipped.hasSuffix("…"))
+}
+
+@Test func mindMapBudgetFoldsOldestUntouchedTopicsInsteadOfLosingThem() throws {
+    let limits = MindMapLimits(topics: 2, branchesPerTopic: 2, pointsPerBranch: 2)
+    let start = try ConversationMindMap().applying(revision([
+        topic("", "旧话题", summary: "早先的结论", [("甲", ["一"])]), topic("", "当前话题", [("甲", ["一"])])
+    ]), limits: limits).map
+    let next = try start.applying(revision([topic("T2", "当前话题", [("甲", ["二"])]), topic("", "新话题", [("甲", ["一"])])]), limits: limits).map
+    #expect(next.topics.map(\.title) == [ConversationMindMap.archiveTitle, "当前话题", "新话题"])
+    #expect(next.topics[0].branches[0].points.map(\.text) == ["旧话题：早先的结论"])
+    // Later overflow adds to the same overview topic.
+    let later = try next.applying(revision([topic("", "第三个话题", [("甲", ["一"])])]), limits: limits).map
+    #expect(later.topics.map(\.title) == [ConversationMindMap.archiveTitle, "新话题", "第三个话题"])
+    #expect(later.topics[0].branches[0].points.count == 2)
+    #expect(later.topics.filter { $0.title == ConversationMindMap.archiveTitle }.count == 1)
+}
+
+@Test func mindMapRejectsMalformedRevisionsAndAcceptsAnEmptyOne() throws {
+    let map = try ConversationMindMap().applying(revision([topic("", "话题", [("甲", ["一"])])]), limits: wide).map
+    for bad in ["not json", #"{"remove":[]}"#, #"{"topics":[{"id":"","branches":[]}],"remove":[]}"#] {
+        #expect(throws: SummaryError.self) { try map.applying(bad, limits: wide) }
+    }
+    let unchanged = try map.applying(#"{"topics":[],"remove":[]}"#, limits: wide)
+    #expect(unchanged.map == map && unchanged.changedTopicIDs.isEmpty)
+    let fenced = try map.applying("```json\n" + revision([topic("T1", "话题", [("甲", ["二"])])]) + "\n```", limits: wide)
+    #expect(fenced.map.topics[0].branches[0].points[0].text == "二")
+}
+
+@Test func mindMapUnknownOrRepeatedIDsCannotOverwriteAnotherTopic() throws {
+    let map = try ConversationMindMap().applying(revision([topic("", "话题甲", [("甲", ["一"])])]), limits: wide).map
+    let next = try map.applying(revision([
+        topic("T1", "话题甲", [("甲", ["二"])]),
+        topic("T1", "冒用编号", [("甲", ["三"])]),
+        topic("T7", "未知编号", [("甲", ["四"])])
+    ]), limits: wide).map
+    #expect(next.topics.map(\.title) == ["话题甲", "冒用编号", "未知编号"])
+    #expect(Set(next.topics.map(\.id)).count == 3)
+}
+
+@Test func mindMapNodeIdentityIsStableAcrossRewritesOfUnchangedText() throws {
+    let first = try ConversationMindMap().applying(revision([topic("", "话题", [("甲", ["保持不变"])])]), limits: wide).map
+    let second = try first.applying(revision([topic("T1", "话题", [("甲", ["保持不变", "新增"])])]), limits: wide).map
+    #expect(second.topics[0].branches[0].id == first.topics[0].branches[0].id)
+    #expect(second.topics[0].branches[0].points[0].id == first.topics[0].branches[0].points[0].id)
+}
+
+@Test func mindMapContextCarriesIDsAndFullContentForTheNextRevision() throws {
+    let map = try ConversationMindMap().applying(revision([
+        topic("", "话题\"引号\"", summary: "一句话", kind: "advertisement", [("甲", ["节点"])])
+    ]), limits: wide).map
+    let context = try #require(JSONSerialization.jsonObject(with: Data(map.modelContext.utf8)) as? [[String: Any]])
+    #expect(context.first?["id"] as? String == "T1")
+    #expect(context.first?["title"] as? String == "话题\"引号\"")
+    #expect(context.first?["kind"] as? String == "advertisement")
+    #expect(map.outline.contains("广告 / 赞助：话题\"引号\""))
+}
+
+// MARK: - Cadence and batching
+
+@Test func mindMapCadenceProducesAFirstMapAfterAFewSentences() {
+    #expect(MindMapCadence.delay(newCharacters: 30, hasMap: false, paneOpen: false, justOpened: false,
+                                 sinceLastUpdate: nil, sessionElapsed: 20) == nil)
+    #expect(MindMapCadence.delay(newCharacters: 90, hasMap: false, paneOpen: false, justOpened: false,
+                                 sinceLastUpdate: nil, sessionElapsed: 20) == 0)
+    // An open pane maps whatever exists instead of waiting for more.
+    #expect(MindMapCadence.delay(newCharacters: 30, hasMap: false, paneOpen: true, justOpened: false,
+                                 sinceLastUpdate: nil, sessionElapsed: 20) == 0)
+    #expect(MindMapCadence.delay(newCharacters: 0, hasMap: false, paneOpen: true, justOpened: true,
+                                 sinceLastUpdate: nil, sessionElapsed: 20) == nil)
+}
+
+@Test func mindMapCadenceIntervalGrowsWithSessionLengthAndStaysAnchored() {
+    #expect(MindMapCadence.interval(sessionElapsed: 60) == 20)
+    #expect(MindMapCadence.interval(sessionElapsed: 600) == 50)
+    #expect(MindMapCadence.interval(sessionElapsed: 5 * 3_600) == 240)
+    // Ten minutes in, 30 s after the last update: 20 s remain.
+    #expect(MindMapCadence.delay(newCharacters: 300, hasMap: true, paneOpen: true, justOpened: false,
+                                 sinceLastUpdate: 30, sessionElapsed: 600) == 20)
+    // A short fragment waits for more text; a burst only waits for the gap.
+    #expect(MindMapCadence.delay(newCharacters: 20, hasMap: true, paneOpen: true, justOpened: false,
+                                 sinceLastUpdate: 300, sessionElapsed: 600) == nil)
+    #expect(MindMapCadence.delay(newCharacters: 3_000, hasMap: true, paneOpen: false, justOpened: false,
+                                 sinceLastUpdate: 5, sessionElapsed: 3_600) == 7)
+    // Opening the pane refreshes now, but never closer than the minimum gap.
+    #expect(MindMapCadence.delay(newCharacters: 50, hasMap: true, paneOpen: true, justOpened: true,
+                                 sinceLastUpdate: 100, sessionElapsed: 3_600) == 0)
+}
+
+@Test func mindMapLimitsGrowWithSessionLengthAndStaySmallerLocally() {
+    #expect(MindMapLimits.forSession(minutes: 10, local: false).topics == 5)
+    #expect(MindMapLimits.forSession(minutes: 300, local: false).topics == 12)
+    #expect(MindMapLimits.forSession(minutes: 300, local: true).topics == 6)
+    #expect(MindMapLimits.forSession(minutes: 300, local: true).pointsPerBranch == 3)
+}
+
+@Test func mindMapBatcherCoversEveryCharacterWithinBudget() {
+    let long = String(repeating: "长", count: 3_000)
+    let rows = entries(["first", long, "last"])
+    let fragments = MindMapBatcher.fragments(rows)
+    #expect(fragments.map(\.text).joined() == "first" + long + "last")
+    #expect(fragments.allSatisfy { $0.text.count < LocalSummaryService.inputBudget })
+    #expect(fragments.filter(\.completesSource).map(\.sourceID) == rows.map(\.id))
+    var remaining = fragments[...], batches = 0
+    while !remaining.isEmpty {
+        let batch = MindMapBatcher.batch(remaining, budget: 1_500)
+        #expect(batch.reduce(0) { $0 + $1.text.count + 1 } <= 1_500)
+        remaining = remaining[batch.endIndex...]; batches += 1
+    }
+    #expect(batches == 3)
+}
+
+// MARK: - Model lifecycle
+
+@MainActor private final class RowSource {
+    var rows: [CaptionEntry] = []
+}
+
+@Test @MainActor func mindMapStartsFromAnEmptyMapAndANewSessionForgetsIt() async {
+    let engine = MapStub()
     let model = ConversationSummaryModel { engine }
-    #expect(!model.isExpanded)
-    #expect(engine.prepared == 0)
-    #expect(!model.isGenerating)
+    let first = entries(["We will ship next week.", "Then we test performance."])
+    model.begin(sessionStartedAt: .now) { first }
+    model.requestNow()
+    await waitUntilIdle(model)
+    #expect(engine.requests.count == 1)
+    #expect(engine.requests[0].map == "[]")
+    #expect(engine.requests[0].previousTail.isEmpty)
+    #expect(engine.requests[0].newText == "We will ship next week.\nThen we test performance.")
+    #expect(model.map.topics.map(\.id) == ["T1"])
+    let second = entries(["A different meeting."])
+    model.begin(sessionStartedAt: .now) { second }
+    #expect(!model.map.hasContent)
+    model.requestNow()
+    await waitUntilIdle(model)
+    #expect(engine.requests.last?.map == "[]")
+    #expect(engine.requests.last?.newText == "A different meeting.")
 }
 
-@Test @MainActor func summaryCoversMoreThanThe100LiveCaptionsAndReleasesModel() async {
-    let engine = SummaryStub()
+@Test @MainActor func mindMapRewritesTheSameTopicAcrossUpdatesWithinASession() async {
+    let engine = MapStub()
+    let model = ConversationSummaryModel(cloudAvailable: { false }) { engine }
+    let source = RowSource()
+    source.rows = entries(["We will ship next week."])
+    model.begin(sessionStartedAt: .now) { source.rows }
+    model.isExpanded = true
+    model.requestNow()
+    await waitUntilIdle(model)
+    source.rows += entries(["Actually the release slips to the end of the month."])
+    model.requestNow()
+    await waitUntilIdle(model)
+    #expect(engine.requests.count == 2)
+    #expect(engine.requests[1].newText == "Actually the release slips to the end of the month.")
+    #expect(engine.requests[1].map.contains("\"id\":\"T1\""))
+    #expect(engine.requests[1].previousTail == "We will ship next week.")
+    #expect(model.map.topics.map(\.id) == ["T1"])
+    #expect(model.map.topics[0].summary == "第2次整理")
+    #expect(model.coveredCount == 2)
+    #expect(engine.prepared == 1)
+}
+
+@Test @MainActor func longBacklogIsCommittedAfterEachRound() async {
+    let engine = MapStub(); engine.budget = 60; engine.delay = .milliseconds(30)
     let model = ConversationSummaryModel { engine }
-    let entries = summaryEntries(250)
-    model.generate(sourceRevision: 250) { entries }
-    await waitForSummary(model)
-    #expect(model.coveredCount == 250)
-    #expect(engine.requests.map { $0.0 }.joined().contains("Topic 0:"))
-    #expect(engine.requests.map { $0.0 }.joined().contains("Topic 249:"))
-    #expect(engine.requests.dropFirst().allSatisfy { !$0.1.isEmpty })
+    let rows = entries((0..<6).map { "Sentence number \($0) carries some content." })
+    model.begin(sessionStartedAt: .now) { rows }
+    model.requestNow()
+    await waitFor { model.map.hasContent }
+    // The first committed round is visible while later rounds still run.
+    #expect(model.isGenerating)
+    await waitUntilIdle(model)
+    #expect(engine.requests.count == 6)
+    #expect(engine.requests.allSatisfy { $0.newText.count <= 60 })
+    #expect(model.coveredCount == 6)
+}
+
+@Test @MainActor func cloudFailureResendsALargeBatchAtTheLocalBudget() async {
+    let cloud = MapStub(); cloud.fails = true
+    let local = MapStub(); local.local = true
+    let service = AutomaticSummaryService(makeCloud: { cloud }, makeLocal: { local })
+    let model = ConversationSummaryModel { service }
+    let rows = entries((0..<30).map { "Sentence \($0) " + String(repeating: "x", count: 80) })
+    model.begin(sessionStartedAt: .now) { rows }
+    model.requestNow()
+    await waitUntilIdle(model)
+    #expect(cloud.requests.count == 1)
+    #expect(cloud.requests[0].newText.count > LocalSummaryService.inputBudget)
+    #expect(local.requests.count >= 3)
+    #expect(local.requests.allSatisfy { $0.newText.count <= LocalSummaryService.inputBudget })
+    #expect(local.requests.allSatisfy { $0.limits == MindMapLimits.forSession(minutes: 0, local: true) })
+    #expect(model.coveredCount == 30)
+    #expect(model.errorMessage == nil)
+}
+
+@Test @MainActor func openPaneUpdatesAutomaticallyOnceThereIsEnoughText() async {
+    let engine = MapStub()
+    let model = ConversationSummaryModel(cadenceScale: 0.001, cloudAvailable: { false }) { engine }
+    let vm = CaptionViewModel(conversationSummary: model)
+    vm.addCaption(english: "Hello there.", chinese: "")
+    try? await Task.sleep(for: .milliseconds(40))
+    #expect(engine.requests.isEmpty)   // pane closed and no background provider
+    vm.expandConversationSummary()
+    await waitFor { !engine.requests.isEmpty }
+    await waitUntilIdle(model)
+    #expect(engine.requests.count == 1)
+    vm.addCaption(english: "Short.", chinese: "")
+    try? await Task.sleep(for: .milliseconds(60))
+    #expect(engine.requests.count == 1)   // fragments wait for more text
+    vm.addCaption(english: "Now a longer sentence that clearly carries new information.", chinese: "")
+    await waitFor { engine.requests.count == 2 }
+    await waitUntilIdle(model)
+    #expect(engine.requests.count == 2)
+    #expect(engine.requests[1].newText.hasPrefix("Short."))
+    #expect(engine.maximumActiveRequests == 1)
+    model.collapse()
     #expect(engine.cancelled)
 }
 
-@Test @MainActor func summaryUpdateProcessesOnlyNewRowsAndRepairsDependentFactsAfterSourceCorrection() async {
-    var engines: [SummaryStub] = []
-    let model = ConversationSummaryModel {
-        let engine = SummaryStub(); engines.append(engine); return engine
+@Test @MainActor func backgroundUpdatesNeedACloudProviderAndKeepRunningWhenThePaneCloses() async {
+    let sentence = "Background speech " + String(repeating: "with content ", count: 8)
+    for cloud in [false, true] {
+        let engine = MapStub()
+        let model = ConversationSummaryModel(cadenceScale: 0.001, cloudAvailable: { cloud }) { engine }
+        let vm = CaptionViewModel(conversationSummary: model)
+        model.backgroundUpdatesRequested = true
+        #expect(model.isActive == cloud)
+        vm.addCaption(english: sentence, chinese: "")
+        if cloud { await waitFor { !engine.requests.isEmpty } } else { try? await Task.sleep(for: .milliseconds(60)) }
+        await waitUntilIdle(model)
+        #expect(engine.requests.count == (cloud ? 1 : 0))
+        #expect(model.map.hasContent == cloud)
+        // Closing the pane leaves background cloud work in place.
+        model.collapse()
+        #expect(!engine.cancelled)
+        model.backgroundUpdatesRequested = false
     }
-    var entries = summaryEntries(3)
-    let first = entries
-    model.generate(sourceRevision: 3) { first }
-    await waitForSummary(model)
-    let oldContext = model.map.context()
-    entries.append(CaptionEntry(timestamp: .now, englishText: "A new topic", chineseText: ""))
-    let second = entries
-    model.generate(sourceRevision: 4) { second }
-    await waitForSummary(model)
-    #expect(engines[1].requests.first?.0 == "[1] A new topic\n")
-    #expect(!oldContext.isEmpty)
-    #expect(engines[1].requests.first?.1.isEmpty == true)
-    let original = entries[0]
-    entries[0] = CaptionEntry(id: original.id, timestamp: original.timestamp,
-        englishText: "An earlier source correction", chineseText: "")
-    let corrected = entries
-    model.generate(sourceRevision: 5) { corrected }
-    await waitForSummary(model)
-    #expect(engines[2].requests.first?.0.contains("An earlier source correction") == true)
-    #expect(engines[2].requests.first?.1.contains("T1|discussion|") == true)
 }
 
-@Test @MainActor func clearingOrCollapsingRejectsLateSummaryEvenIfBackendIgnoresCancellation() async {
+@Test @MainActor func pauseCancelsWorkAndResumeMapsThePendingText() async {
+    let engine = MapStub(); engine.delay = .milliseconds(80)
+    let model = ConversationSummaryModel(cadenceScale: 0.001, cloudAvailable: { false }) { engine }
+    let vm = CaptionViewModel(conversationSummary: model)
+    vm.addCaption(english: "First topic with enough words to start the very first map.", chinese: "")
+    vm.expandConversationSummary()
+    await waitFor { !engine.requests.isEmpty }
+    model.pauseAutomaticUpdates()
+    vm.addCaption(english: "A sentence spoken while paused, long enough to count as new.", chinese: "")
+    try? await Task.sleep(for: .milliseconds(120))
+    #expect(!model.map.hasContent)
+    #expect(!model.isGenerating && !model.isUpdateScheduled && !model.isAutoUpdating)
+    vm.resumeConversationSummary()
+    await waitFor { model.map.hasContent }
+    await waitUntilIdle(model)
+    #expect(model.coveredCount == 2)
+    model.collapse()
+}
+
+@Test @MainActor func failurePausesAutomaticUpdatesAndRetrySendsTheSameText() async {
+    let engine = MapStub(); engine.fails = true
+    let model = ConversationSummaryModel(cadenceScale: 0.001, cloudAvailable: { false }) { engine }
+    let vm = CaptionViewModel(conversationSummary: model)
+    vm.addCaption(english: "Something worth mapping, with enough characters to begin.", chinese: "")
+    vm.expandConversationSummary()
+    await waitFor { model.errorMessage != nil }
+    #expect(!model.isAutoUpdating)
+    vm.addCaption(english: "More speech arrives after the failure and must not retry by itself.", chinese: "")
+    try? await Task.sleep(for: .milliseconds(60))
+    #expect(engine.requests.count == 1)
+    engine.fails = false
+    vm.resumeConversationSummary()
+    await waitFor { model.map.hasContent }
+    await waitUntilIdle(model)
+    #expect(engine.requests.last?.newText.contains("Something worth mapping") == true)
+    #expect(model.coveredCount == 2 && model.errorMessage == nil)
+    model.collapse()
+}
+
+@Test @MainActor func clearingOrCollapsingRejectsALateResultEvenIfTheBackendIgnoresCancellation() async {
     for clear in [false, true] {
-        let engine = SummaryStub(); engine.delay = .milliseconds(60)
-        let model = ConversationSummaryModel { engine }
+        let engine = MapStub(); engine.delay = .milliseconds(60)
+        let model = ConversationSummaryModel(cloudAvailable: { false }) { engine }
+        let rows = entries(["Content"])
+        model.begin(sessionStartedAt: .now) { rows }
         model.isExpanded = true
-        model.generate(sourceRevision: 1) { summaryEntries(1) }
-        for _ in 0..<100 {
-            if !engine.requests.isEmpty { break }
-            try? await Task.sleep(for: .milliseconds(2))
-        }
+        model.requestNow()
+        await waitFor { !engine.requests.isEmpty }
         if clear { model.reset() } else { model.collapse() }
         try? await Task.sleep(for: .milliseconds(100))
-        #expect(model.text.isEmpty)
+        #expect(!model.map.hasContent)
         #expect(!model.isGenerating)
         #expect(engine.cancelled)
     }
 }
 
-@Test @MainActor func summaryFailureKeepsPreviousResultAndRetriesUnseenRows() async {
-    var engines: [SummaryStub] = []
-    let model = ConversationSummaryModel {
-        let engine = SummaryStub(); engine.fails = engines.count == 1
-        engines.append(engine); return engine
+@Test @MainActor func idleLocalWorkerIsReleasedAndOnlyNewTextIsSentAfterwards() async {
+    var engines: [MapStub] = []
+    let model = ConversationSummaryModel(idleTimeout: .milliseconds(20), cadenceScale: 0.001, cloudAvailable: { false }) {
+        let engine = MapStub(); engines.append(engine); return engine
     }
-    let first = summaryEntries(1)
-    model.generate(sourceRevision: 1) { first }
-    await waitForSummary(model)
-    let prior = model.text
-    let second = first + [CaptionEntry(timestamp: .now, englishText: "New material", chineseText: "")]
-    model.generate(sourceRevision: 2) { second }
-    await waitForSummary(model)
-    #expect(model.text == prior)
-    #expect(model.coveredCount == 1)
-    #expect(model.errorMessage != nil)
-    model.generate(sourceRevision: 2) { second }
-    await waitForSummary(model)
-    #expect(engines[2].requests.first?.0 == "[1] New material\n")
-    #expect(model.coveredCount == 2)
+    let vm = CaptionViewModel(conversationSummary: model)
+    vm.addCaption(english: "First sentence that has enough characters to map.", chinese: "")
+    vm.expandConversationSummary()
+    await waitFor { model.map.hasContent }
+    await waitUntilIdle(model)
+    try? await Task.sleep(for: .milliseconds(60))
+    #expect(engines.first?.cancelled == true)
+    vm.addCaption(english: "New after idle, again with enough characters to count.", chinese: "")
+    await waitFor { engines.count == 2 && !(engines.last?.requests.isEmpty ?? true) }
+    await waitUntilIdle(model)
+    #expect(engines.last?.requests.first?.newText == "New after idle, again with enough characters to count.")
+    model.collapse()
 }
 
-@Test @MainActor func summaryReadsFullSavedCurrentSessionAndClearRetiresIt() async throws {
+@Test @MainActor func mindMapReadsTheFullSavedSessionBeyondTheLiveCaptionCache() async throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent("SummaryHistory.\(UUID())")
     defer { try? FileManager.default.removeItem(at: directory) }
     let store = CaptionHistoryStore(directory: directory)
-    let engine = SummaryStub()
-    let summary = ConversationSummaryModel { engine }
+    let engine = MapStub()
+    let summary = ConversationSummaryModel(cloudAvailable: { false }) { engine }
     let vm = CaptionViewModel(historyStore: store, conversationSummary: summary)
     vm.addCaption(english: "Previous conversation must be excluded", chinese: "")
     vm.beginCompanionSession()
@@ -403,120 +448,34 @@ private func topicBatch(_ count: Int = 1) -> SummaryBatch {
     #expect(vm.captionHistory.count == 100)
     #expect(try await store.captions(in: vm.companionSessionID).count == 150)
     vm.requestConversationSummary()
-    await waitForSummary(summary)
+    await waitUntilIdle(summary)
     #expect(summary.coveredCount == 150)
-    let input = engine.requests.map { $0.0 }.joined()
+    let input = engine.requests.map(\.newText).joined(separator: "\n")
     #expect(input.contains("Line 0\n"))
-    #expect(input.contains("Line 149\n"))
+    #expect(input.contains("Line 149"))
     #expect(!input.contains("Previous conversation"))
-    let revision = vm.conversationSourceRevision
     vm.clearHistory()
-    #expect(vm.conversationSourceRevision == 0)
-    #expect(revision == 150)
-    #expect(vm.conversationSummary.text.isEmpty)
+    #expect(!vm.conversationSummary.map.hasContent)
 }
 
-@MainActor private func waitForAutomaticSummary(_ model: ConversationSummaryModel) async {
-    for _ in 0..<600 {
-        if !model.isGenerating && !model.isUpdateScheduled { return }
-        try? await Task.sleep(for: .milliseconds(5))
-    }
-    Issue.record("Automatic summary did not settle")
-    model.collapse()
-}
+// MARK: - Providers
 
-@Test @MainActor func automaticSummaryCoalescesBusyChangesAndReusesOneWorker() async {
-    let engine = SummaryStub(); engine.delay = .milliseconds(40)
-    let model = ConversationSummaryModel(updateDelay: .milliseconds(10), idleTimeout: .seconds(5)) { engine }
-    let vm = CaptionViewModel(conversationSummary: model)
-    vm.addCaption(english: "First topic", chinese: "")
-    #expect(engine.prepared == 0)
-    vm.expandConversationSummary()
-    for _ in 0..<200 {
-        if !engine.requests.isEmpty { break }
-        try? await Task.sleep(for: .milliseconds(2))
-    }
-    #expect(!model.draftText.isEmpty)
-    vm.addCaption(english: "Second topic", chinese: "")
-    vm.addCaption(english: "Third topic", chinese: "")
-    await waitForAutomaticSummary(model)
-    #expect(engine.requests.count == 2)
-    #expect(engine.requests.last?.0 == "[1] Second topic\n[2] Third topic\n")
-    #expect(engine.maximumActiveRequests == 1)
-    #expect(engine.prepared == 1)
-    #expect(!engine.cancelled)
-    #expect(model.coveredCount == 3)
-    #expect(model.completedSourceRevision == vm.conversationSourceRevision)
-    #expect(model.draftText.isEmpty)
-    model.collapse()
-    #expect(engine.cancelled)
-}
-
-@Test @MainActor func automaticSummaryPauseRejectsDraftAndPendingWorkThenResumes() async {
-    var engines: [SummaryStub] = []
-    let model = ConversationSummaryModel(updateDelay: .milliseconds(5)) {
-        let engine = SummaryStub(); engine.delay = .milliseconds(80); engines.append(engine); return engine
-    }
-    let vm = CaptionViewModel(conversationSummary: model)
-    vm.addCaption(english: "First topic", chinese: "")
-    vm.expandConversationSummary()
-    for _ in 0..<200 {
-        if !model.draftText.isEmpty { break }
-        try? await Task.sleep(for: .milliseconds(2))
-    }
-    vm.addCaption(english: "Queued topic", chinese: "")
-    model.pauseAutomaticUpdates()
-    vm.addCaption(english: "Topic while paused", chinese: "")
-    try? await Task.sleep(for: .milliseconds(100))
-    #expect(engines.count == 1)
-    #expect(model.text.isEmpty && model.draftText.isEmpty)
-    #expect(!model.isGenerating && !model.isUpdateScheduled)
-    #expect(!model.isAutoUpdating)
-    #expect(engines[0].cancelled)
-    vm.resumeConversationSummary()
-    await waitForAutomaticSummary(model)
-    #expect(engines.count == 2)
-    #expect(model.coveredCount == 3)
-    model.collapse()
-}
-
-@Test @MainActor func automaticSummaryReleasesIdleWorkerAndOnlyProcessesNewContentOnReturn() async {
-    var engines: [SummaryStub] = []
-    let model = ConversationSummaryModel(updateDelay: .milliseconds(5), idleTimeout: .milliseconds(20)) {
-        let engine = SummaryStub(); engines.append(engine); return engine
-    }
-    let vm = CaptionViewModel(conversationSummary: model)
-    vm.addCaption(english: "First", chinese: "")
-    vm.expandConversationSummary()
-    await waitForAutomaticSummary(model)
-    try? await Task.sleep(for: .milliseconds(60))
-    #expect(engines.first?.cancelled == true)
-    vm.addCaption(english: "New after idle", chinese: "")
-    await waitForAutomaticSummary(model)
-    #expect(engines.count == 2)
-    #expect(engines.last?.requests.first?.0 == "[1] New after idle\n")
-    model.collapse()
-}
-
-@Test @MainActor func automaticSummaryFailurePausesInsteadOfRetryingEveryCaption() async {
-    var engines: [SummaryStub] = []
-    let model = ConversationSummaryModel(updateDelay: .milliseconds(5)) {
-        let engine = SummaryStub(); engine.fails = engines.isEmpty; engines.append(engine); return engine
-    }
-    let vm = CaptionViewModel(conversationSummary: model)
-    vm.addCaption(english: "First", chinese: "")
-    vm.expandConversationSummary()
-    await waitForAutomaticSummary(model)
-    #expect(!model.isAutoUpdating && model.errorMessage != nil)
-    vm.addCaption(english: "Second", chinese: "")
-    try? await Task.sleep(for: .milliseconds(30))
-    #expect(engines.count == 1)
-    vm.resumeConversationSummary()
-    await waitForAutomaticSummary(model)
-    #expect(engines.count == 2)
-    #expect(model.coveredCount == 2)
-    #expect(model.errorMessage == nil)
-    model.collapse()
+@Test @MainActor func mindMapPromptAsksForMergingAndStatesTheLimits() {
+    let limits = MindMapLimits(topics: 9, branchesPerTopic: 4, pointsPerBranch: 3)
+    let messages = MindMapPrompt.messages(MindMapRequest(map: "[]", previousTail: "上一句",
+        newText: "新的记录", limits: limits, sessionMinutes: 75))
+    #expect(messages.count == 2)
+    #expect(messages[0]["content"]?.contains("最多9个主题") == true)
+    #expect(messages[0]["content"]?.contains("最多3个节点") == true)
+    #expect(messages[0]["content"]?.contains("沿用原id") == true)
+    #expect(messages[0]["content"]?.contains("remove") == true)
+    #expect(messages[1]["content"]?.contains("上一句") == true)
+    #expect(messages[1]["content"]?.contains("新的记录") == true)
+    #expect(messages[1]["content"]?.contains("75分钟") == true)
+    let format = MindMapPrompt.responseFormat(limits: limits)
+    let json = String(decoding: try! JSONSerialization.data(withJSONObject: format, options: [.sortedKeys]), as: UTF8.self)
+    #expect(json.contains("\"maxItems\":9"))
+    #expect(json.contains("\"maxItems\":3"))
 }
 
 @Test func summaryEventDecoderPreservesSplitUnicodeAndStreamsBeforeCompletion() throws {
@@ -581,93 +540,4 @@ private func topicBatch(_ count: Int = 1) -> SummaryBatch {
     } catch SummaryError.startupTimedOut {
         // The missing-health path is distinct from worker exit and model absence.
     } catch { Issue.record("Wrong startup error: \(error)") }
-}
-
-@Test func schemaEnvelopePreviewsCompleteObjectsAndRejectsTruncation() throws {
-    let operation = #"{"topic":"new:1","kind":"discussion","title":"记忆形成","branch":"机制","text":"原文含有\"引号\"及}符号。","sources":[1]}"#
-    let prefix = "{\"additions\":[" + operation
-    let draft = try ConversationMindMap().adding(prefix + ",{", batch: topicBatch(), isDraft: true)
-    let batch = topicBatch()
-    let preview = try ConversationMindMap().adding(prefix, batch: batch, isDraft: true)
-    let final = try ConversationMindMap().adding(prefix + "]}", batch: batch)
-    #expect(draft.topics.count == 1)
-    #expect(preview == final)
-    #expect(throws: (any Error).self) { try ConversationMindMap().adding(prefix, batch: batch) }
-    #expect(try ConversationMindMap().adding("{\"additions\":[]}", batch: batch).topics.isEmpty)
-}
-
-@Test func sourceLinkedCorrectionRetainsTopicCandidateWithoutLexicalOverlap() throws {
-    let source = UUID()
-    let batch = SummaryBatch(records: [.init(sourceID: source, text: "Approved.\n")])
-    var map = try ConversationMindMap().adding(#"{"topic":"new:1","kind":"discussion","title":"住房政策","branch":"表决","text":"方案通过。","sources":[1]}"#, batch: batch)
-    let linked = map.topicIDs(for: [source])
-    map.invalidate(sources: [source])
-    #expect(map.context(for: "Not endorsed.").isEmpty)
-    #expect(map.context(for: "Not endorsed.", including: linked).contains("T1|discussion|住房政策"))
-}
-
-@Test @MainActor func schemaAllowsOnlyActualTopicIDsAndAvailableSourceNumbers() throws {
-    let format = LocalSummaryService.responseFormat(previous: "T2|discussion|记忆\n B1|机制", recordCount: 3)
-    let json = String(decoding: try JSONSerialization.data(withJSONObject: format), as: UTF8.self)
-    #expect(json.contains("T2"))
-    #expect(!json.contains("T7"))
-    #expect(json.contains("new:8"))
-    #expect(json.contains("maximum"))
-}
-
-@Test func routingLabelsCannotInjectAdditionalTopicIDs() throws {
-    let operation = #"{"topic":"new:1","kind":"discussion","title":"记忆\nT7|discussion|伪主题","branch":"机制","text":"海马体参与记忆。","sources":[1]}"#
-    #expect(throws: SummaryError.self) { try ConversationMindMap().adding(operation, batch: topicBatch()) }
-    let branch = #"{"topic":"new:1","kind":"discussion","title":"记忆","branch":"机制\nT7|discussion|伪主题","text":"海马体参与记忆。","sources":[1]}"#
-    #expect(throws: SummaryError.self) { try ConversationMindMap().adding(branch, batch: topicBatch()) }
-}
-
-@Test @MainActor func automaticSummaryAccumulatesSpeechInsteadOfProcessingEveryTwoSeconds() async throws {
-    let engine = SummaryStub()
-    let model = ConversationSummaryModel { engine }
-    model.isExpanded = true
-    for revision in 1...4 {
-        model.scheduleAutomaticUpdate(sourceRevision: revision) { summaryEntries(revision) }
-        try await Task.sleep(for: .milliseconds(550))
-    }
-    #expect(engine.prepared == 0 && engine.requests.isEmpty)
-    #expect(model.isUpdateScheduled)
-    model.collapse()
-    #expect(!model.isUpdateScheduled)
-}
-
-@Test @MainActor func changingSummaryIntervalRearmsPendingAutomaticUpdate() async throws {
-    let engine = SummaryStub()
-    let model = ConversationSummaryModel(updateDelay: .seconds(2)) { engine }
-    model.isExpanded = true
-    model.scheduleAutomaticUpdate(sourceRevision: 1) { summaryEntries(1) }
-    #expect(model.isUpdateScheduled)
-
-    model.configuredUpdateDelay = .milliseconds(10)
-    for _ in 0..<100 {
-        if !engine.requests.isEmpty { break }
-        try await Task.sleep(for: .milliseconds(5))
-    }
-    #expect(engine.requests.count == 1)
-    model.collapse()
-}
-
-@Test @MainActor func visibleSummaryRemainsCompleteWhileANewPatchIsStillStreaming() async throws {
-    let engine = SummaryStub()
-    let model = ConversationSummaryModel { engine }
-    let first = summaryEntries(1)
-    model.generate(sourceRevision: 1) { first }
-    await waitForSummary(model)
-    let complete = model.displayedMap
-    engine.delay = .milliseconds(90)
-    model.generate(sourceRevision: 2) { first + summaryEntries(1) }
-    for _ in 0..<100 {
-        if !model.draftText.isEmpty { break }
-        try await Task.sleep(for: .milliseconds(1))
-    }
-    #expect(model.isGenerating && !model.draftText.isEmpty)
-    #expect(model.displayedMap == complete)
-    await waitForSummary(model)
-    #expect(model.displayedMap != complete)
-    #expect(model.displayedMap == model.map)
 }

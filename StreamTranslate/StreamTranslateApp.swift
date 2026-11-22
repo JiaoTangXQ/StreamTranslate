@@ -69,6 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let companionServer = CompanionServer()
     private let webCompanionServer = WebCaptionServer()
     private let remoteCompanion = RemoteCaptionRelay()
+    private lazy var phoneMicrophone = PhoneMicrophoneCoordinator(relay: remoteCompanion, viewModel: viewModel, settings: settings)
     private let companionPublisher = CompanionCaptionPublisher()
     private var translationPreparationTask: Task<Void, Never>?
     private var translationPreparationID = UUID()
@@ -111,8 +112,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             runCompanionPrivacyCheck()
             return
         }
-        AppLogger.clear()
-        AppLogger.log("App launched. Log file: \(AppLogger.path)")
+        AppLogger.startNewLaunch()
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
+        AppLogger.log("App launched \(version) (\(build)). Log file: \(AppLogger.path)")
 
         setupStatusItem()
         setupFloatingPanel()
@@ -572,6 +575,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             _ = settings.webCompanionEnabled
             _ = settings.remoteCompanionEnabled
             _ = settings.webQuickConnection
+            _ = settings.phoneMicrophoneEnabled
         } onChange: {
             Task { @MainActor [weak self] in
                 self?.updateCompanionConfiguration()
@@ -594,8 +598,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         else { webCompanionServer.stop() }
         if settings.remoteCompanionEnabled { remoteCompanion.start() }
         else { remoteCompanion.stop() }
+        phoneMicrophone.update()
         if settings.companionEnabled || settings.webCompanionEnabled || settings.remoteCompanionEnabled {
-            companionPublisher.start(viewModel: viewModel, server: companionServer, webServer: webCompanionServer, remote: remoteCompanion)
+            companionPublisher.start(viewModel: viewModel, server: companionServer, webServer: webCompanionServer,
+                                     remote: remoteCompanion, phone: phoneMicrophone)
         } else { companionPublisher.stop() }
     }
 
@@ -622,6 +628,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let suite = windowFixturePreferenceSuite { UserDefaults.standard.removePersistentDomain(forName: suite) }
         translationPreparationTask?.cancel()
         companionPublisher.stop()
+        phoneMicrophone.stop()
         companionServer.stop()
         webCompanionServer.stop()
         remoteCompanion.stop()

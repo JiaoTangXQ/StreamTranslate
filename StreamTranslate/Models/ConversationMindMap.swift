@@ -1,297 +1,240 @@
 import Foundation
-import CryptoKit
 
-/// Application-owned forest: model output appends facts instead of replacing
-/// or reparenting topics. Caption corrections invalidate dependent facts only.
+/// Size budget for one mind map. The map is the session's compressed memory:
+/// every update re-synthesizes it from the previous map plus new captions, so
+/// its size, not the transcript length, bounds each request.
+struct MindMapLimits: Equatable, Sendable {
+    var topics: Int
+    var branchesPerTopic: Int
+    var pointsPerBranch: Int
+
+    static let titleLength = 24, summaryLength = 60, branchLength = 16
+    static let pointLength = 48, detailLength = 120
+
+    /// Longer sessions get room for more topics; branches and nodes stay few
+    /// so the map remains an overview instead of a transcript.
+    static func forSession(minutes: Int, local: Bool) -> Self {
+        let topics = switch minutes {
+        case ..<20: 5
+        case ..<60: 7
+        case ..<180: 9
+        default: 12
+        }
+        return local ? Self(topics: min(topics, 6), branchesPerTopic: 3, pointsPerBranch: 3)
+                     : Self(topics: topics, branchesPerTopic: 4, pointsPerBranch: 4)
+    }
+}
+
+/// Topic → branch → node outline of the whole conversation. Model output
+/// replaces whole topics (so a story told in halves is merged and earlier
+/// mistakes are corrected) while untouched topics, their IDs and their order
+/// stay as they were.
 struct ConversationMindMap: Equatable, Sendable {
-    enum Kind: String, Decodable, Sendable {
-        case discussion, advertisement, uncertain
+    enum Kind: String, Sendable {
+        case discussion, advertisement
         var label: String {
             switch self {
             case .discussion: "话题"
             case .advertisement: "广告 / 赞助"
-            case .uncertain: "待归类"
             }
         }
     }
+
     struct Point: Equatable, Identifiable, Sendable {
         let id: String
         let text: String
         let detail: String
-        var sources: Set<UUID>
     }
+
     struct Branch: Equatable, Identifiable, Sendable {
         let id: String
         let title: String
-        var points: [Point]
+        let points: [Point]
     }
+
     struct Topic: Equatable, Identifiable, Sendable {
         let id: String
         let title: String
         let kind: Kind
-        var branches: [Branch]
-        var nextBranch = 1
-        var routingTerms: Set<String> = []
+        let summary: String
+        let branches: [Branch]
+        var pointCount: Int { branches.reduce(0) { $0 + $1.points.count } }
     }
+
+    /// The result of applying one model revision.
+    struct Revision: Equatable, Sendable {
+        let map: ConversationMindMap
+        /// Topics added or rewritten by this revision, in map order.
+        let changedTopicIDs: [String]
+    }
+
     private(set) var topics: [Topic] = []
     private var nextTopic = 1
-    var hasContent: Bool { topics.contains { $0.branches.contains { !$0.points.isEmpty } } }
+
+    var hasContent: Bool { topics.contains { $0.pointCount > 0 } }
+    var pointCount: Int { topics.reduce(0) { $0 + $1.pointCount } }
 
     var outline: String {
-        topics.filter { $0.branches.contains { !$0.points.isEmpty } }.map { topic in
-            "\(topic.kind.label)：\(topic.title)\n" + topic.branches.filter { !$0.points.isEmpty }.map { branch in
-                "- \(branch.title)\n" + branch.points.map {
-                    "  - \($0.text)" + ($0.detail.isEmpty ? "" : "\n    " + $0.detail)
-                }.joined(separator: "\n")
-            }.joined(separator: "\n")
+        topics.map { topic in
+            var lines = ["\(topic.kind.label)：\(topic.title)"]
+            if !topic.summary.isEmpty { lines.append("  \(topic.summary)") }
+            for branch in topic.branches {
+                lines.append("- \(branch.title)")
+                for point in branch.points {
+                    lines.append("  - \(point.text)")
+                    if !point.detail.isEmpty { lines.append("    \(point.detail)") }
+                }
+            }
+            return lines.joined(separator: "\n")
         }.joined(separator: "\n\n")
     }
 
-    /// Read-only routing and duplicate index. Short nodes are comparison labels,
-    /// never new evidence. A bounded note helps distinguish new qualifiers from
-    /// repetitions; the complete historical outline is never sent wholesale.
-    func context(for input: String = "", including linked: Set<String> = [], limit: Int = 1_200) -> String {
-        var lines: [String] = [], size = 0
-        let terms = Self.terms(input)
-        var scored: [(index: Int, score: Int)] = []
-        for index in topics.indices {
-            let labels = topics[index].title + " " + topics[index].branches.map(\.title).joined(separator: " ")
-            let knownTerms = Self.terms(labels).union(topics[index].routingTerms)
-            let score = knownTerms.intersection(terms).count + (linked.contains(topics[index].id) ? 10_000 : 0)
-            if score > 0 { scored.append((index, score)) }
+    /// The current map as the model sees it. Compact JSON keeps IDs explicit
+    /// so a revision can say which topic it replaces or merges away.
+    var modelContext: String {
+        let value: [[String: Any]] = topics.map { topic in
+            ["id": topic.id, "kind": topic.kind.rawValue, "title": topic.title, "summary": topic.summary,
+             "branches": topic.branches.map { branch in
+                 ["title": branch.title, "points": branch.points.map { ["text": $0.text, "detail": $0.detail] }]
+             }]
         }
-        scored.sort { $0.score == $1.score ? $0.index > $1.index : $0.score > $1.score }
-        let matched = scored.prefix(6).map { $0.index }
-        // Unrelated recent topics are not default parents. Sending their names
-        // can bias extraction toward an opening advertisement or earlier event.
-        let order: [Int] = input.isEmpty ? Array(topics.indices.reversed()) : matched
-        for index in order {
-            let topic = topics[index]
-            var line = "\(topic.id)|\(topic.kind.rawValue)|\(topic.title)"
-            guard size + line.count + 1 <= limit else { continue }
-            if lines.count < 3 {
-                for branch in topic.branches.prefix(6) {
-                    let heading = "\n \(branch.id)|\(branch.title)"
-                    guard size + line.count + heading.count + 1 <= limit else { break }
-                    line += heading
-                    // Retain core early nodes and recent developments. Positions
-                    // are resolved only against this request's immutable baseline.
-                    let indices = Set(branch.points.indices.prefix(2)).union(branch.points.indices.suffix(3)).sorted()
-                    for pointIndex in indices {
-                        let point = branch.points[pointIndex]
-                        let label = try? JSONSerialization.data(withJSONObject: [
-                            "node": String(point.text.prefix(40)), "note": String(point.detail.prefix(64))
-                        ], options: [.sortedKeys])
-                        let node = "\n  P\(pointIndex + 1)|" + String(decoding: label ?? Data(), as: UTF8.self)
-                        guard size + line.count + node.count + 1 <= limit else { break }
-                        line += node
-                    }
-                }
-            }
-            guard size + line.count + 1 <= limit else { continue }
-            lines.append(line); size += line.count + 1
+        guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes]) else {
+            return "[]"
         }
-        return lines.joined(separator: "\n")
+        return String(decoding: data, as: UTF8.self)
     }
 
-    func topicIDs(for sources: Set<UUID>) -> Set<String> {
-        Set(topics.filter { topic in
-            topic.branches.contains { $0.points.contains { !$0.sources.isDisjoint(with: sources) } }
-        }.map(\.id))
-    }
-
-    /// Reprocess every source of an affected fact, so correcting one source
-    /// does not lose another source that contributed to the same fact.
-    func dependentSources(of changed: Set<UUID>) -> Set<UUID> {
-        var affected = changed
-        let points = topics.flatMap(\.branches).flatMap(\.points)
-        var previousCount: Int
-        repeat {
-            previousCount = affected.count
-            for point in points where !point.sources.isDisjoint(with: affected) { affected.formUnion(point.sources) }
-        } while affected.count != previousCount
-        return affected
-    }
-
-    mutating func invalidate(sources: Set<UUID>) {
-        for topic in topics.indices {
-            for branch in topics[topic].branches.indices {
-                topics[topic].branches[branch].points.removeAll { !$0.sources.isDisjoint(with: sources) }
-            }
-        }
-    }
-
-    mutating func pruneEmptyTopics() {
-        for topic in topics.indices { topics[topic].branches.removeAll { $0.points.isEmpty } }
-        topics.removeAll { $0.branches.isEmpty }
-    }
-
-    private struct Addition: Decodable {
-        let topic: String
-        let kind: Kind
-        let title: String?
-        let branch: String
-        let text: String
-        let detail: String?
-        let match: String?
-        let sources: [Int]
-    }
-
-    func adding(_ output: String, batch: SummaryBatch, isDraft: Bool = false) throws -> Self {
-        var result = self, aliases: [String: String] = [:]
-        let lines = try Self.operationLines(output, isDraft: isDraft)
-        var count = 0
-        for (offset, raw) in lines.enumerated() {
-            let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            if line.isEmpty || line == "[]" || line.hasPrefix("```") { continue }
-            let addition: Addition
-            do { addition = try JSONDecoder().decode(Addition.self, from: Data(line.utf8)) }
-            catch {
-                if isDraft && offset == lines.count - 1 { break }
-                throw SummaryError.invalidResult
-            }
-            count += 1
-            guard addition.topic.range(of: #"^(?:T[1-9][0-9]*|new:[1-9][0-9]*)$"#, options: .regularExpression) != nil else {
-                throw SummaryError.invalidResult
-            }
-            guard count <= 8, !addition.text.trimmingCharacters(in: .whitespaces).isEmpty,
-                  addition.text.count <= 40, (addition.detail?.count ?? 0) <= 160, !addition.sources.isEmpty,
-                  addition.sources.allSatisfy({ $0 > 0 && $0 <= batch.records.count }),
-                  addition.branch.count <= 60, addition.branch.rangeOfCharacter(from: .newlines) == nil,
-                  !addition.branch.contains("|") else { throw SummaryError.invalidResult }
-            let trimmedBranch = addition.branch.trimmingCharacters(in: .whitespacesAndNewlines)
-            let branchTitle = trimmedBranch.isEmpty ? "要点" : trimmedBranch
-            let sources = Set(addition.sources.map { batch.records[$0 - 1].sourceID })
-            if let match = addition.match, !match.isEmpty {
-                guard match.range(of: #"^P[1-9][0-9]*$"#, options: .regularExpression) != nil,
-                      let nodeNumber = Int(match.dropFirst()),
-                      let topic = topics.first(where: { $0.id == addition.topic && $0.kind == addition.kind }),
-                      let originalBranch = topic.branches.first(where: { $0.id == branchTitle || Self.key($0.title) == Self.key(branchTitle) }),
-                      originalBranch.points.indices.contains(nodeNumber - 1),
-                      let ti = result.topics.firstIndex(where: { $0.id == topic.id }),
-                      let bi = result.topics[ti].branches.firstIndex(where: { $0.id == originalBranch.id }) else {
-                    throw SummaryError.invalidResult
-                }
-                // A repeated mention adds provenance, never rewrites or moves a
-                // node. New qualifiers/decisions must arrive as distinct nodes.
-                result.topics[ti].branches[bi].points[nodeNumber - 1].sources.formUnion(sources)
-                continue
-            }
-            let alias = addition.topic + "|" + addition.kind.rawValue
-            var topicIndex: Int?
-            if let existing = topics.firstIndex(where: { $0.id == addition.topic }), topics[existing].kind == addition.kind {
-                topicIndex = existing
-            } else if let id = aliases[alias] {
-                topicIndex = result.topics.firstIndex { $0.id == id }
-                if let topicIndex, let title = addition.title, Self.key(title) != Self.key(result.topics[topicIndex].title) {
-                    // Conflicting labels for one new alias must never make the
-                    // first narrow subject a parent of unrelated later facts.
-                    throw SummaryError.invalidResult
-                }
-            }
-            if topicIndex == nil {
-                guard addition.topic.hasPrefix("new:") || topics.contains(where: { $0.id == addition.topic }),
-                      let title = addition.title?.trimmingCharacters(in: .whitespacesAndNewlines),
-                      !title.isEmpty, title.count <= 60, title.rangeOfCharacter(from: .newlines) == nil,
-                      !title.contains("|") else { throw SummaryError.invalidResult }
-                guard result.topics.count < 300 else { throw SummaryError.mapCapacityReached }
-                result.topics.append(Topic(id: "T\(result.nextTopic)", title: title, kind: addition.kind, branches: []))
-                result.nextTopic += 1
-                topicIndex = result.topics.count - 1
-                aliases[alias] = result.topics[topicIndex!].id
-            }
-            guard let topicIndex else { throw SummaryError.invalidResult }
-            let sourceTerms = Self.englishTerms(addition.sources.map { batch.records[$0 - 1].text }.joined(separator: " "))
-            result.topics[topicIndex].routingTerms.formUnion(sourceTerms)
-            if result.topics[topicIndex].routingTerms.count > 256 {
-                result.topics[topicIndex].routingTerms = Set(result.topics[topicIndex].routingTerms.sorted().prefix(256))
-            }
-            var branchIndex = result.topics[topicIndex].branches.firstIndex {
-                $0.id == branchTitle || Self.key($0.title) == Self.key(branchTitle)
-            }
-            if branchIndex == nil {
-                guard let first = branchTitle.unicodeScalars.first, (0x4E00...0x9FFF).contains(first.value),
-                      !branchTitle.contains("new:") else { throw SummaryError.invalidResult }
-                let next = result.topics[topicIndex].nextBranch
-                result.topics[topicIndex].branches.append(Branch(id: "B\(next)", title: branchTitle, points: []))
-                result.topics[topicIndex].nextBranch += 1
-                branchIndex = result.topics[topicIndex].branches.count - 1
-            }
-            let branch = branchIndex!
-            let detail = addition.detail?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if let existing = result.topics[topicIndex].branches[branch].points.firstIndex(where: {
-                Self.key($0.text) == Self.key(addition.text) && Self.key($0.detail) == Self.key(detail)
-            }) {
-                result.topics[topicIndex].branches[branch].points[existing].sources.formUnion(sources)
-            } else {
-                guard result.topics.reduce(0, { $0 + $1.branches.reduce(0, { $0 + $1.points.count }) }) < 6_000 else {
-                    throw SummaryError.mapCapacityReached
-                }
-                let identity = result.topics[topicIndex].id + "/" + result.topics[topicIndex].branches[branch].id
-                    + sources.map(\.uuidString).sorted().joined(separator: "/") + addition.text + detail
-                let id = SHA256.hash(data: Data(identity.utf8)).map { String(format: "%02x", $0) }.joined()
-                result.topics[topicIndex].branches[branch].points.append(Point(id: id, text: addition.text, detail: detail, sources: sources))
-            }
-        }
-        guard isDraft || count > 0 || (output.trimmingCharacters(in: .whitespacesAndNewlines) == "[]" || lines.isEmpty) else {
+    /// Applies `{"topics":[...],"remove":[...]}`. Each returned topic with an
+    /// existing ID replaces that topic in place; other topics are appended.
+    /// Removed IDs disappear unless the same response also rewrites them.
+    /// Oversized text and counts are clipped rather than rejected, because a
+    /// slightly long node is still useful; malformed structure is rejected.
+    func applying(_ output: String, limits: MindMapLimits) throws -> Revision {
+        guard let root = try? JSONSerialization.jsonObject(with: Data(Self.stripFence(output).utf8)) as? [String: Any],
+              let items = root["topics"] as? [[String: Any]] else {
             throw SummaryError.invalidResult
         }
-        return result
-    }
-
-    /// Production responses use a schema-constrained envelope. Scan complete
-    /// objects for previews; final decoding validates the entire envelope.
-    private static func operationLines(_ output: String, isDraft: Bool) throws -> [String] {
-        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.range(of: #"^\{\s*"additions"\s*:"#, options: .regularExpression) != nil else {
-            return output.components(separatedBy: .newlines)
-        }
-        if !isDraft {
-            guard let root = try JSONSerialization.jsonObject(with: Data(trimmed.utf8)) as? [String: Any],
-                  root.count == 1, let items = root["additions"] as? [[String: Any]] else { throw SummaryError.invalidResult }
-            return try items.map { String(decoding: try JSONSerialization.data(withJSONObject: $0), as: UTF8.self) }
-        }
-        guard let arrayStart = trimmed.firstIndex(of: "[") else { return [] }
-        var lines: [String] = [], start: String.Index?, depth = 0, quoted = false, escaped = false
-        for index in trimmed.indices where index > arrayStart {
-            let character = trimmed[index]
-            if quoted {
-                if escaped { escaped = false }
-                else if character == "\\" { escaped = true }
-                else if character == "\"" { quoted = false }
-            } else if character == "\"" { quoted = true }
-            else if character == "{" { if depth == 0 { start = index }; depth += 1 }
-            else if character == "}" {
-                depth -= 1
-                if depth == 0, let start { lines.append(String(trimmed[start...index])) }
+        let removals = Set((root["remove"] as? [Any] ?? []).compactMap { $0 as? String })
+        var result = self
+        var changed: [String] = []
+        var claimed: Set<String> = []
+        for item in items {
+            guard let title = Self.clean(item["title"], limit: MindMapLimits.titleLength), !title.isEmpty else {
+                throw SummaryError.invalidResult
             }
-        }
-        return lines
-    }
-
-    private static func key(_ text: String) -> String {
-        text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-    }
-
-    private static func englishTerms(_ text: String) -> Set<String> {
-        let common: Set<String> = ["the", "and", "that", "this", "with", "from", "have", "will", "they", "about", "there", "what", "your", "into", "were", "been", "more", "than", "then", "also", "just", "when", "which", "their", "does", "some", "them", "can", "could", "would", "should", "may", "might", "our", "has", "are", "for", "but", "you", "not", "now", "one", "its", "his", "her", "today", "episode", "podcast", "sponsor", "sponsored", "advertisement", "return", "returning", "back", "topic", "discuss", "discussion", "welcome", "talk", "talking", "content", "previous", "earlier", "first", "another"]
-        return Set(text.lowercased().components(separatedBy: .letters.inverted).filter {
-            $0.count >= 3 && !common.contains($0) && $0.unicodeScalars.allSatisfy { (97...122).contains($0.value) }
-        })
-    }
-
-    private static func terms(_ text: String) -> Set<String> {
-        let common: Set<String> = ["节目", "本期", "本次", "讨论", "话题", "记录", "内容", "广告", "赞助", "刚才", "现在", "回到", "欢迎", "关于", "然后", "继续", "今日", "今天", "我们", "他们", "以及", "信息", "影响", "作用", "方面", "进展", "机制"]
-        var result = englishTerms(text)
-        let characters = Array(text.unicodeScalars)
-        for index in 0..<max(0, characters.count - 1) {
-            let pair = characters[index...index + 1]
-            if pair.allSatisfy({ (0x4E00...0x9FFF).contains($0.value) }) {
-                let term = String(String.UnicodeScalarView(pair))
-                if !common.contains(term) { result.insert(term) }
+            let kind: Kind = (item["kind"] as? String) == Kind.advertisement.rawValue ? .advertisement : .discussion
+            let summary = Self.clean(item["summary"], limit: MindMapLimits.summaryLength) ?? ""
+            let requestedID = (item["id"] as? String)?.trimmingCharacters(in: .whitespaces) ?? ""
+            let reuses = !requestedID.isEmpty && !claimed.contains(requestedID)
+                && topics.contains { $0.id == requestedID }
+            let id: String
+            if reuses { id = requestedID } else { id = "T\(result.nextTopic)"; result.nextTopic += 1 }
+            claimed.insert(id)
+            var branches: [Branch] = []
+            for rawBranch in (item["branches"] as? [[String: Any]] ?? []) {
+                guard branches.count < limits.branchesPerTopic else { break }
+                let branchTitle = Self.clean(rawBranch["title"], limit: MindMapLimits.branchLength)
+                    .flatMap { $0.isEmpty ? nil : $0 } ?? "要点"
+                let branchID = id + "/" + branchTitle
+                var points: [Point] = []
+                for rawPoint in (rawBranch["points"] as? [Any] ?? []) {
+                    guard points.count < limits.pointsPerBranch else { break }
+                    let fields = rawPoint as? [String: Any]
+                    guard let text = Self.clean(fields?["text"] ?? rawPoint, limit: MindMapLimits.pointLength),
+                          !text.isEmpty else { continue }
+                    let detail = Self.clean(fields?["detail"], limit: MindMapLimits.detailLength) ?? ""
+                    guard !points.contains(where: { $0.text == text }) else { continue }
+                    points.append(Point(id: branchID + "/" + text, text: text, detail: detail == text ? "" : detail))
+                }
+                guard !points.isEmpty else { continue }
+                if let index = branches.firstIndex(where: { $0.title == branchTitle }) {
+                    let merged = (branches[index].points + points).prefix(limits.pointsPerBranch)
+                    branches[index] = Branch(id: branchID, title: branchTitle, points: Array(merged))
+                } else {
+                    branches.append(Branch(id: branchID, title: branchTitle, points: points))
+                }
             }
+            let topic = Topic(id: id, title: title, kind: kind, summary: summary, branches: branches)
+            if let index = result.topics.firstIndex(where: { $0.id == id }) {
+                result.topics[index] = topic
+            } else {
+                result.topics.append(topic)
+            }
+            changed.append(id)
         }
-        return result
+        // `remove` is honored only for a real merge: the same response rewrote
+        // an existing topic that absorbed them. A bare removal (for example
+        // to make room) folds the topics into the overview instead, so a
+        // revision can never silently erase earlier parts of the session.
+        let mergedIntoExisting = claimed.contains { id in topics.contains { $0.id == id } }
+        let removable = removals.subtracting(claimed)
+        if mergedIntoExisting {
+            result.topics.removeAll { removable.contains($0.id) }
+        }
+        result.topics.removeAll { $0.pointCount == 0 }
+        result.foldOldestTopics(keeping: claimed, limit: limits.topics,
+                                forcing: mergedIntoExisting ? [] : removable)
+        let remaining = Set(result.topics.map(\.id))
+        return Revision(map: result, changedTopicIDs: changed.filter { remaining.contains($0) })
+    }
+
+    static let archiveTitle = "更早的话题"
+
+    /// A model that ignores the topic budget must not grow the map without
+    /// bound, and a long session must not silently lose its first hours. The
+    /// oldest untouched topics become one line each in an overview topic,
+    /// which later revisions may rewrite like any other topic.
+    private mutating func foldOldestTopics(keeping claimed: Set<String>, limit: Int, forcing: Set<String> = []) {
+        let isArchive: (Topic) -> Bool = { $0.title == Self.archiveTitle && $0.kind == .discussion }
+        let live = topics.filter { !isArchive($0) }
+        let forced = live.filter { forcing.contains($0.id) }
+        let overflow = max(0, live.count - forced.count - max(1, limit))
+        let oldest = live.filter { !claimed.contains($0.id) && !forcing.contains($0.id) }.prefix(overflow)
+        let folded = forced + oldest
+        guard !folded.isEmpty || live.count > max(1, limit) else { return }
+        if !folded.isEmpty {
+            let foldedIDs = Set(folded.map(\.id))
+            let existing = topics.firstIndex(where: isArchive)
+            let archive = existing.map { topics[$0] }
+                ?? Topic(id: "T\(nextTopic)", title: Self.archiveTitle, kind: .discussion, summary: "", branches: [])
+            if existing == nil { nextTopic += 1 }
+            let branchID = archive.id + "/概览"
+            var points = archive.branches.flatMap(\.points)
+            for topic in folded {
+                let gist = topic.summary.isEmpty ? (topic.branches.first?.points.first?.text ?? "") : topic.summary
+                let line = gist.isEmpty ? topic.title : topic.title + "：" + gist
+                guard let text = Self.clean(line, limit: MindMapLimits.pointLength),
+                      !points.contains(where: { $0.text == text }) else { continue }
+                points.append(Point(id: branchID + "/" + text, text: text, detail: ""))
+            }
+            let updated = Topic(id: archive.id, title: archive.title, kind: .discussion,
+                summary: "已收拢 \(points.count) 个较早的话题",
+                branches: [Branch(id: branchID, title: "概览", points: points)])
+            topics.removeAll { foldedIDs.contains($0.id) || isArchive($0) }
+            topics.insert(updated, at: 0)
+        }
+        // An oversized response with no older topic left to fold keeps its
+        // first topics.
+        while topics.filter({ !isArchive($0) }).count > limit, let last = topics.indices.last, !isArchive(topics[last]) {
+            topics.removeLast()
+        }
+    }
+
+    private static func clean(_ value: Any?, limit: Int) -> String? {
+        guard let raw = value as? String else { return nil }
+        let text = raw.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text.count > limit else { return text }
+        return String(text.prefix(limit - 1)) + "…"
+    }
+
+    /// Some compatible gateways wrap JSON in a Markdown fence despite the
+    /// requested JSON response format.
+    private static func stripFence(_ text: String) -> String {
+        var value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard value.hasPrefix("```") else { return value }
+        value = String(value.drop(while: { $0 != "\n" }))
+        if value.hasSuffix("```") { value = String(value.dropLast(3)) }
+        return value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

@@ -112,7 +112,7 @@ struct CaptionQuickControls: View {
                             }.frame(maxWidth: .infinity).padding(.vertical, 4)
                         }.buttonStyle(.plain)
                     }
-                    Text("自动适合中英文交替；首次可能下载多语模型。固定语言可使用专用流式识别。录音中切换会短暂中断并自动恢复。")
+                    Text("自动会同时收听中英文并显示正在说的语言；固定语言只运行一个识别器。录音中切换会短暂中断并自动恢复。")
                         .font(.caption).foregroundStyle(.secondary)
                 }.padding(16).frame(width: 250)
             }
@@ -125,15 +125,17 @@ struct CaptionQuickControls: View {
         .fixedSize(horizontal: false, vertical: true)
     }
     private func source(_ source: AudioInputSource, title: String, icon: String, compact: Bool) -> some View {
-        Button { viewModel.changeCaptureConfiguration(settings: settings, source: source) } label: {
+        // While the phone is the source, neither Mac source is shown as selected.
+        let selected = (viewModel.activeCaptureSource ?? settings.audioInputSource) == source
+        return Button { viewModel.changeCaptureConfiguration(settings: settings, source: source) } label: {
             HStack(spacing: 4) {
                 Image(systemName: icon)
                 if !compact { Text(title).font(.system(size: 12, weight: .medium)) }
             }.frame(minWidth: 30, minHeight: 32).padding(.horizontal, compact ? 0 : 6)
-                .background(settings.audioInputSource == source ? Color.cyan.opacity(0.23) : .clear, in: RoundedRectangle(cornerRadius: 7))
+                .background(selected ? Color.cyan.opacity(0.23) : .clear, in: RoundedRectangle(cornerRadius: 7))
         }.buttonStyle(.plain).focused($focused, equals: source.rawValue)
             .help("切换到\(title)；正在翻译时自动收尾并恢复")
-            .accessibilityLabel(title).accessibilityAddTraits(settings.audioInputSource == source ? .isSelected : [])
+            .accessibilityLabel(title).accessibilityAddTraits(selected ? .isSelected : [])
             .disabled(switchingDisabled)
     }
     private func action(_ title: String, icon: String, perform: @escaping () -> Void) -> some View {

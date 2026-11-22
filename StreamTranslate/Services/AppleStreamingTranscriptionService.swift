@@ -26,6 +26,38 @@ enum AppleStreamingTranscriptionError: Error, LocalizedError {
     }
 }
 
+/// One SpeechTranscriber result with its per-token audio timing. The bilingual
+/// recognizer needs token timing to drop audio another recognizer already
+/// committed, and confidence to judge which language is being spoken.
+struct AppleRecognitionResult: Sendable {
+    struct Run: Sendable, Equatable {
+        let text: String
+        let startSample: Int64
+        let endSample: Int64
+        let confidence: Double?
+    }
+
+    let text: String
+    let runs: [Run]
+    let startSample: Int64
+    let endSample: Int64
+    let isFinal: Bool
+    let processingLatency: TimeInterval
+
+    /// Character-weighted mean of the token confidences Apple reports. Only
+    /// final results carry confidence; volatile results return nil.
+    var confidence: Double? {
+        var weighted = 0.0, count = 0
+        for run in runs {
+            guard let confidence = run.confidence else { continue }
+            let length = max(1, run.text.trimmingCharacters(in: .whitespaces).count)
+            weighted += confidence * Double(length)
+            count += length
+        }
+        return count > 0 ? weighted / Double(count) : nil
+    }
+}
+
 /// Streams the already-normalized 16 kHz mono capture directly into Apple's
 /// on-device transcriber. Unlike the Whisper snapshot path, audio already seen
 /// by the model is never submitted again.
@@ -54,6 +86,41 @@ final class AppleStreamingTranscriptionService: StreamingTranscriptionProviding,
         from audioStream: AsyncStream<CapturedAudioChunk>,
         vocabulary: String
     ) -> AsyncThrowingStream<StreamingTranscriptionUpdate, Error> {
+        let language = self.language
+        let results = self.results(from: audioStream, vocabulary: vocabulary)
+        return AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    for try await result in results {
+                        continuation.yield(StreamingTranscriptionUpdate(
+                            output: TranscriptionOutput(
+                                text: result.text,
+                                language: language,
+                                reportedLanguageCode: language.rawValue,
+                                words: []
+                            ),
+                            startSample: result.startSample,
+                            endSample: result.endSample,
+                            isFinal: result.isFinal,
+                            processingLatency: result.processingLatency
+                        ))
+                    }
+                    continuation.finish()
+                } catch is CancellationError {
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { @Sendable _ in task.cancel() }
+        }
+    }
+
+    /// The recognizer core. Results keep token timing and confidence.
+    func results(
+        from audioStream: AsyncStream<CapturedAudioChunk>,
+        vocabulary: String
+    ) -> AsyncThrowingStream<AppleRecognitionResult, Error> {
         let language = self.language
         let fastResults = self.fastResults
         let boundedFinalization = self.boundedFinalization
@@ -98,35 +165,35 @@ final class AppleStreamingTranscriptionService: StreamingTranscriptionProviding,
                                     continue
                                 }
 
-                                let start = max(
-                                    0,
-                                    Int64((CMTimeGetSeconds(result.range.start)
-                                        * Self.sampleRate).rounded())
-                                )
-                                let end = max(
-                                    start,
-                                    Int64((CMTimeGetSeconds(result.range.end)
-                                        * Self.sampleRate).rounded())
-                                )
+                                let start = Self.sample(result.range.start)
+                                let end = max(start, Self.sample(result.range.end))
                                 let audioEnd = CMTimeGetSeconds(result.range.end)
                                 finalization?.recognized(through: end, isFinal: result.isFinal, text: text)
                                 let finalizedAt = CMTimeGetSeconds(
                                     result.resultsFinalizationTime
                                 )
-                                continuation.yield(
-                                    StreamingTranscriptionUpdate(
-                                        output: TranscriptionOutput(
-                                            text: text,
-                                            language: language,
-                                            reportedLanguageCode: language.rawValue,
-                                            words: []
-                                        ),
-                                        startSample: start,
-                                        endSample: end,
-                                        isFinal: result.isFinal,
-                                        processingLatency: max(0, finalizedAt - audioEnd)
-                                    )
-                                )
+                                var runs: [AppleRecognitionResult.Run] = []
+                                // Spaces and punctuation may lack their own time
+                                // range; they belong to the token before them.
+                                var cursor = start
+                                for run in result.text.runs {
+                                    let piece = String(result.text[run.range].characters)
+                                    guard !piece.isEmpty else { continue }
+                                    let range = run.audioTimeRange
+                                    let runStart = range.map { Self.sample($0.start) } ?? cursor
+                                    let runEnd = max(runStart, range.map { Self.sample($0.end) } ?? cursor)
+                                    cursor = runEnd
+                                    runs.append(.init(text: piece, startSample: runStart,
+                                        endSample: runEnd, confidence: run.transcriptionConfidence))
+                                }
+                                continuation.yield(AppleRecognitionResult(
+                                    text: text,
+                                    runs: runs,
+                                    startSample: start,
+                                    endSample: end,
+                                    isFinal: result.isFinal,
+                                    processingLatency: max(0, finalizedAt - audioEnd)
+                                ))
                             }
                             // A clean EOF can also precede the end of continuous
                             // audio. Let the consumer retire that capture now.
@@ -147,7 +214,6 @@ final class AppleStreamingTranscriptionService: StreamingTranscriptionProviding,
                             do { try await Task.sleep(for: .milliseconds(200)) } catch { return }
                             guard let boundary = finalization.nextBoundary() else { continue }
                             do {
-                                AppLogger.log("Speech pause finalization at \(Double(boundary) / Self.sampleRate)s")
                                 try await analyzer.finalize(through: CMTime(value: boundary, timescale: 16_000))
                             } catch {
                                 if !Task.isCancelled { AppLogger.log("Speech bounded finalization: \(error)") }
@@ -205,6 +271,12 @@ final class AppleStreamingTranscriptionService: StreamingTranscriptionProviding,
             runningTask = nil
             runningTaskID = nil
         }
+    }
+
+    private static func sample(_ time: CMTime) -> Int64 {
+        let seconds = CMTimeGetSeconds(time)
+        guard seconds.isFinite else { return 0 }
+        return max(0, Int64((seconds * sampleRate).rounded()))
     }
 
     private static func makePreparedTranscriber(

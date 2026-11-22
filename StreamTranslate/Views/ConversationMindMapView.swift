@@ -1,26 +1,34 @@
 import SwiftUI
 
-/// The current subject opens automatically; deliberate disclosures stay put.
-/// Older facts remain in the map, with a compact overview before expansion.
+/// Topics the latest update touched open automatically; a topic the reader
+/// opened or closed stays that way. Collapsed topics still show their
+/// one-line summary, so the whole session reads at a glance.
 struct ConversationMindMapView: View {
     let map: ConversationMindMap
+    var activeTopicIDs: [String] = []
     var overviewOnly = false
-    @State private var activeTopic: String?
     @State private var disclosure: [String: Bool] = [:]
     @State private var advertisementsExpanded = false
 
     private var discussions: [ConversationMindMap.Topic] {
-        map.topics.filter { $0.kind != .advertisement && !$0.branches.allSatisfy { $0.points.isEmpty } }
+        map.topics.filter { $0.kind != .advertisement && $0.pointCount > 0 }
     }
     private var advertisements: [ConversationMindMap.Topic] {
-        map.topics.filter { $0.kind == .advertisement && !$0.branches.allSatisfy { $0.points.isEmpty } }
+        map.topics.filter { $0.kind == .advertisement && $0.pointCount > 0 }
+    }
+
+    private func opensByDefault(_ topic: ConversationMindMap.Topic) -> Bool {
+        if discussions.count <= 2 { return true }
+        let active = activeTopicIDs.filter { id in discussions.contains { $0.id == id } }
+        return active.isEmpty ? topic.id == discussions.last?.id : active.contains(topic.id)
     }
 
     var body: some View {
-        LazyVStack(alignment: .leading, spacing: 20) {
+        LazyVStack(alignment: .leading, spacing: 14) {
             ForEach(discussions) { topic in
-                OutlineTopic(topic: topic, overviewOnly: overviewOnly, expanded: Binding(
-                    get: { disclosure[topic.id] ?? (topic.id == (activeTopic ?? discussions.last?.id)) },
+                OutlineTopic(topic: topic, overviewOnly: overviewOnly,
+                             isRecent: activeTopicIDs.contains(topic.id), expanded: Binding(
+                    get: { disclosure[topic.id] ?? opensByDefault(topic) },
                     set: { disclosure[topic.id] = $0 }))
             }
             if !advertisements.isEmpty {
@@ -40,7 +48,7 @@ struct ConversationMindMapView: View {
                     .accessibilityLabel("\(advertisementsExpanded ? "收起" : "展开")广告与赞助，\(advertisements.count)项")
                     if advertisementsExpanded {
                         ForEach(advertisements) { topic in
-                            OutlineTopic(topic: topic, overviewOnly: overviewOnly, expanded: Binding(
+                            OutlineTopic(topic: topic, overviewOnly: overviewOnly, isRecent: false, expanded: Binding(
                                 get: { disclosure[topic.id] ?? false },
                                 set: { disclosure[topic.id] = $0 }))
                         }
@@ -49,12 +57,8 @@ struct ConversationMindMapView: View {
                 .padding(.top, 8)
             }
         }
-        .onChange(of: map) { old, new in
-            if new.topics.isEmpty { activeTopic = nil; disclosure = [:]; advertisementsExpanded = false; return }
-            let previous = Dictionary(uniqueKeysWithValues: old.topics.map { ($0.id, $0.branches.flatMap(\.points).map(\.id)) })
-            if let changed = new.topics.last(where: { $0.kind != .advertisement && previous[$0.id] != $0.branches.flatMap(\.points).map(\.id) }) {
-                activeTopic = changed.id
-            }
+        .onChange(of: map.topics.isEmpty) { _, empty in
+            if empty { disclosure = [:]; advertisementsExpanded = false }
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("对话主题与要点")
@@ -64,42 +68,47 @@ struct ConversationMindMapView: View {
 private struct OutlineTopic: View {
     let topic: ConversationMindMap.Topic
     let overviewOnly: Bool
+    let isRecent: Bool
     @Binding var expanded: Bool
-    private var count: Int { topic.branches.reduce(0) { $0 + $1.points.count } }
-    private var branches: [ConversationMindMap.Branch] { topic.branches.filter { !$0.points.isEmpty } }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Button { expanded.toggle() } label: {
-                HStack(alignment: .center, spacing: 9) {
-                    Circle().fill(CaptionWorkspaceStyle.accent).frame(width: 5, height: 5)
-                    Text(topic.title)
-                        .font(.system(size: topic.kind == .advertisement ? 13 : 15, weight: .semibold))
-                        .foregroundStyle(CaptionWorkspaceStyle.foreground)
-                        .lineSpacing(3).multilineTextAlignment(.leading)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    if !expanded {
-                        Text("\(count)").font(.system(size: 11)).monospacedDigit()
-                            .foregroundStyle(CaptionWorkspaceStyle.secondary)
+                HStack(alignment: .top, spacing: 9) {
+                    Circle().fill(isRecent ? CaptionWorkspaceStyle.accent : CaptionWorkspaceStyle.secondary.opacity(0.6))
+                        .frame(width: 6, height: 6).padding(.top, 7)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(topic.title)
+                            .font(.system(size: topic.kind == .advertisement ? 13 : 15, weight: .semibold))
+                            .foregroundStyle(CaptionWorkspaceStyle.foreground)
+                            .lineSpacing(3).multilineTextAlignment(.leading)
+                        if !topic.summary.isEmpty {
+                            Text(topic.summary)
+                                .font(.system(size: 12)).lineSpacing(3)
+                                .foregroundStyle(CaptionWorkspaceStyle.secondary)
+                                .lineLimit(expanded ? nil : 2).multilineTextAlignment(.leading)
+                        }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     Image(systemName: expanded ? "chevron.down" : "chevron.right")
                         .font(.system(size: 10, weight: .medium)).foregroundStyle(CaptionWorkspaceStyle.accent)
+                        .padding(.top, 5)
                 }
-                .padding(.horizontal, 12).padding(.vertical, 11)
-                .background(CaptionWorkspaceStyle.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
-                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(CaptionWorkspaceStyle.accent.opacity(0.28), lineWidth: 1))
+                .padding(.horizontal, 12).padding(.vertical, 10)
+                .background(CaptionWorkspaceStyle.accent.opacity(isRecent ? 0.1 : 0.05), in: RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(CaptionWorkspaceStyle.accent.opacity(isRecent ? 0.32 : 0.16), lineWidth: 1))
                 .contentShape(RoundedRectangle(cornerRadius: 8))
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("\(expanded ? "收起" : "展开")主题：\(topic.title)，\(branches.count)个分支，\(count)个节点")
+            .accessibilityLabel("\(expanded ? "收起" : "展开")主题：\(topic.title)。\(topic.summary)。\(topic.branches.count)个分支")
             if expanded {
                 VStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(branches.enumerated()), id: \.element.id) { index, branch in
+                    ForEach(Array(topic.branches.enumerated()), id: \.element.id) { index, branch in
                         HStack(alignment: .top, spacing: 0) {
-                            MindMapEdge(last: index == branches.count - 1, joint: 20)
+                            MindMapEdge(last: index == topic.branches.count - 1, joint: 20)
                                 .stroke(CaptionWorkspaceStyle.accent.opacity(0.5), style: StrokeStyle(lineWidth: 1, lineCap: .round))
                                 .frame(width: 18).accessibilityHidden(true)
-                            OutlineBranch(branch: branch, overviewOnly: overviewOnly).padding(.top, 5).padding(.bottom, 8)
+                            OutlineBranch(branch: branch, overviewOnly: overviewOnly).padding(.top, 5).padding(.bottom, 6)
                         }
                         .fixedSize(horizontal: false, vertical: true)
                     }
@@ -115,45 +124,36 @@ private struct OutlineBranch: View {
     let branch: ConversationMindMap.Branch
     let overviewOnly: Bool
     @State private var disclosure: Bool?
-    @State private var showsAll = false
     private var expanded: Bool { disclosure ?? !overviewOnly }
-    private var points: [ConversationMindMap.Point] {
-        if showsAll || branch.points.count <= 3 { return branch.points }
-        return [branch.points[0]] + branch.points.suffix(2)
-    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Button { disclosure = !expanded } label: {
                 HStack(spacing: 7) {
-                    Text(branch.title == "要点" ? "概览" : branch.title)
-                        .font(.system(size: 12, weight: .semibold))
-                    Text("\(branch.points.count)").font(.system(size: 10)).monospacedDigit()
-                        .foregroundStyle(CaptionWorkspaceStyle.secondary)
+                    Text(branch.title).font(.system(size: 12, weight: .semibold))
+                    if !expanded {
+                        Text("\(branch.points.count)").font(.system(size: 10)).monospacedDigit()
+                            .foregroundStyle(CaptionWorkspaceStyle.secondary)
+                    }
                     Image(systemName: expanded ? "chevron.down" : "chevron.right")
                         .font(.system(size: 8, weight: .semibold))
                     Spacer(minLength: 0)
                 }
                 .foregroundStyle(CaptionWorkspaceStyle.accent)
-                .frame(minHeight: 30).contentShape(Rectangle())
+                .frame(minHeight: 28).contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel("\(expanded ? "收起" : "展开")分支：\(branch.title)，\(branch.points.count)个节点")
             if expanded {
                 VStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(points.enumerated()), id: \.element.id) { index, point in
+                    ForEach(Array(branch.points.enumerated()), id: \.element.id) { index, point in
                         HStack(alignment: .top, spacing: 0) {
-                            MindMapEdge(last: index == points.count - 1, joint: 19)
+                            MindMapEdge(last: index == branch.points.count - 1, joint: 19)
                                 .stroke(CaptionWorkspaceStyle.accent.opacity(0.36), style: StrokeStyle(lineWidth: 1, lineCap: .round))
                                 .frame(width: 14).accessibilityHidden(true)
                             MindMapLeaf(point: point).padding(.vertical, 3)
                         }
                         .fixedSize(horizontal: false, vertical: true)
-                    }
-                    if branch.points.count > 3 {
-                        Button(showsAll ? "收起较早节点" : "其余 \(branch.points.count - 3) 个节点") { showsAll.toggle() }
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(CaptionWorkspaceStyle.accent)
-                            .buttonStyle(.plain).frame(minHeight: 28).padding(.leading, 14)
                     }
                 }
                 .padding(.leading, 3)
@@ -197,7 +197,7 @@ private struct MindMapLeaf: View {
                     .font(.system(size: 8, weight: .semibold)).foregroundStyle(CaptionWorkspaceStyle.secondary)
             }
         }
-        .padding(.horizontal, 9).padding(.vertical, 8)
+        .padding(.horizontal, 9).padding(.vertical, 7)
         .background(Color.white.opacity(hovered ? 0.065 : 0.035), in: RoundedRectangle(cornerRadius: 6))
         .contentShape(RoundedRectangle(cornerRadius: 6))
     }

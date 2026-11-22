@@ -305,14 +305,13 @@ struct SettingsView: View {
                     : "增强模型暂不可用，继续使用 Apple 翻译。若模型在外置磁盘，请保持磁盘连接。")
             }
             section("脑图整理") {
-                HStack(alignment: .center, spacing: 14) {
+                Toggle(isOn: $settings.mindMapBackgroundUpdates) {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("自动整理间隔").font(.system(size: 13, weight: .medium))
-                        note("字幕持续变化时，按这个间隔集中更新一次脑图。最短 30 秒，最长 2 小时。")
-                    }
-                    Spacer(minLength: 0)
-                    SummaryIntervalPicker(selection: $settings.summaryUpdateInterval)
-                }
+                        Text("录音时在后台整理脑图").font(.system(size: 13, weight: .medium))
+                        note("打开脑图时直接看到当前结构。仅在配置了云端总结时生效；只发送字幕文字，不发送音频。")
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                }.toggleStyle(.switch)
+                note("更新节奏自动适应时长：开头几句话就生成第一版，之后约 20 秒到 4 分钟合并一次新内容，前后内容会融合、修正，而不是逐条追加。")
             }
         }
     }
@@ -326,6 +325,8 @@ struct SettingsView: View {
                 note("语音识别和翻译在本机完成。手机字幕启用后会传输文字，不传输原始音频。")
                 Divider().overlay(SettingsTheme.line)
                 note("跨网络模式将加密字幕经你的中转服务器发送给手机；局域网快速连接使用未加密的 HTTP，仅适合可信网络。连接方式在「手机字幕」中管理。")
+                Divider().overlay(SettingsTheme.line)
+                note("配置了云端总结后，对话脑图会把本次字幕文字发送给所选服务（不含音频）；未配置时在本机整理。后台整理可在「识别与翻译」中关闭。")
             }
             section("故障诊断") {
                 Toggle(isOn: $settings.captureDiagnosticsEnabled) {

@@ -14,14 +14,14 @@ import Testing
 }
 
 @Test @MainActor func mindMapExportHTMLIncludesTopicsBranchesAndDetails() throws {
-    let batch = SummaryBatch(records: [.init(sourceID: UUID(), text: "方案通过")])
-    let map = try ConversationMindMap().adding(
-        #"{"topic":"new:1","kind":"discussion","title":"住房政策","branch":"表决","text":"方案通过","detail":"经过表决后正式通过。","sources":[1]}"#,
-        batch: batch
-    )
+    let map = try ConversationMindMap().applying(
+        #"{"topics":[{"id":"","kind":"discussion","title":"住房政策","summary":"方案已经表决通过","branches":[{"title":"表决","points":[{"text":"方案通过","detail":"经过表决后正式通过。"}]}]}],"remove":[]}"#,
+        limits: MindMapLimits.forSession(minutes: 5, local: false)
+    ).map
     let html = ConversationExportService.mindMapHTML(map)
 
     #expect(html.contains("住房政策"))
+    #expect(html.contains("方案已经表决通过"))
     #expect(html.contains("表决"))
     #expect(html.contains("经过表决后正式通过。"))
     #expect(html.contains("class=\"mind-map\""))

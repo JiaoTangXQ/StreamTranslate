@@ -18,7 +18,25 @@ StreamTranslate shows live English↔Chinese subtitles over other Mac apps. It c
 
 [View subtitle appearance settings](docs/screenshots/subtitle-appearance-1.6.0.png).
 
-## Latest update · 1.9.1
+## Latest update · 1.11.0
+
+- **Use the phone as the microphone.** In a meeting, open the paired phone page and tap **用手机收音**. The phone records the room, encrypts the audio and sends it through your relay to the Mac, which recognizes, translates and builds the mind map as usual. Captions and the mind map (**脑图** button) come back to the phone. In tests, the first translated caption appeared about 4–5 seconds after the tap.
+- **The phone cannot take over the Mac.** It can only start its own microphone. The Mac's microphone and system audio are never opened remotely, and a session started on the Mac is not interrupted; the phone shows why its request was refused.
+- **Pair once for 90 days.** Pairing renews when used and survives Mac and relay restarts. Settings → 手机字幕 shows the paired phones and **撤销所有手机** for a lost phone. Phones paired with 1.10.0 or earlier need to scan once more.
+- **Requirements.** The Mac stays on, online and awake (it avoids idle sleep while 允许手机远程收音 is on; use power). The phone keeps the screen on with the page in front. Audio is uncompressed, about 150 MB per hour. Not yet tested on a physical iPhone or over cellular.
+
+See [phone microphone design, security and verification](docs/phone-microphone-1.11.0.md).
+
+### 1.10.0
+
+- **Automatic language now streams.** 自动 mode runs Apple's English and Mandarin streaming recognizers side by side and shows whichever language is being spoken, switching both ways mid-session. It replaces the Whisper snapshot path that cut continuous speech every 8 seconds, re-transcribed each utterance about every 0.75 seconds and produced subtitle-credit hallucinations on music. Existing automatic setups move to it once; Whisper stays selectable in Settings.
+- **The mind map is merged, not appended.** Each update rewrites the topics the new captions continue: a story told in two halves becomes one topic, and an earlier misunderstanding is corrected. Each topic has a one-line summary and at most four branches of four short nodes. Topics beyond the budget for the session length are folded into a one-line overview instead of being dropped.
+- **Update timing adapts to session length.** The first map appears after a few sentences. Later updates come roughly every 20 seconds early on, growing to every 4 minutes after the first hour. With a cloud provider, the map keeps updating while recording even with the pane closed (Settings → 识别与翻译 → 脑图整理), so it is ready when opened. The fixed-interval wheel is removed.
+- **Diagnostics for intermittent gaps.** The log records when audio stops arriving or when audible audio produces no recognition for 20 seconds, and how long the gap lasted. It no longer records every partial transcript, keeps the previous launch's log and is private to your user account.
+
+See [1.10.0 changes and verification](docs/release-1.10.0.md).
+
+### 1.9.1
 
 - **对话脑图** shows a connected tree: **topic → named branches → short nodes**. Nodes contain at most 40 characters; explanations expand on demand. Short panes initially show the branch overview, with explicit controls to reveal nodes.
 - The mind map opens beside the subtitles in wide windows. Compact windows switch between **字幕 / 脑图**. Subtitles are never covered, and both panes have independent scrolling. Drag the divider to adjust column widths.
@@ -38,7 +56,7 @@ Saved text history was introduced in 1.6.1; older diagnostic sessions are not im
 Relay deployment files contain **example host/account values**, not a provisioned public service.
 Model weights, credentials, machine provisioning and generated release binaries are not in this repository.
 
-Fixed English and Mandarin have Apple's continuous on-device speech transcriber. An optional Nemotron Metal backend offers another English streaming path; it can omit long stretches of far-field meeting audio that Apple Speech recognizes, so Apple remains the fixed-English default. WhisperKit remains available for automatic-language detection and manual multilingual recognition.
+Fixed English and Mandarin have Apple's continuous on-device speech transcriber; automatic language runs both side by side and picks the spoken one. An optional Nemotron Metal backend offers another English streaming path; it can omit long stretches of far-field meeting audio that Apple Speech recognizes, so Apple remains the fixed-English default. WhisperKit remains available for manual multilingual recognition.
 
 ## Current behavior
 
@@ -50,11 +68,12 @@ Fixed English and Mandarin have Apple's continuous on-device speech transcriber.
 - Final source text enters transcript history immediately; translation updates the same caption ID later
 - Final translations use Apple Translation's identified batch API, so slow or out-of-order responses cannot overwrite another caption
 - Stopping native streaming recognition closes the audio stream and waits for final words and queued translations before ending the session
-- Whisper Small and Large-v3 Turbo remain selectable for Chinese, automatic language detection, and comparison
+- Automatic language streams English and Mandarin with two Apple recognizers and switches per utterance
+- Whisper Small and Large-v3 Turbo remain selectable for other content and comparison
 - Microphone and ScreenCaptureKit watchdogs rebuild stalled capture after about three seconds
 - Audio, speech recognition, and translation stay on the Mac
 - Optional Qwen source review and bidirectional Hy-MT final refinement update the same caption; guarded revisions, timeouts and memory-pressure fallback retain the fast system path
-- Optional conversation summaries update automatically while their drawer is expanded, use the full current-session original transcript, and are not saved across app relaunches
+- Optional conversation mind maps merge new captions into the existing topics, use the full current-session original transcript, update in the background while recording when a cloud provider is configured, and are not saved across app relaunches
 
 The transcription/translation pipeline uses network access to install missing language assets or optional models/runtimes. Enabling phone subtitles also requires a LAN connection or, for the optional remote relay, Internet access. Audio recognition and translation processing remain local. Configured cloud summaries upload source-text batches and topic labels to the selected provider.
 
@@ -141,7 +160,7 @@ Install the pinned official NeMo-Speech.cpp Metal runtime and English Q8 model:
 
 The installer supports Apple Silicon only, verifies both SHA-256 checksums, and stores assets under `~/Library/Application Support/StreamTranslate/Nemotron`. The runtime uses the M4 GPU through Metal; it does not use Core ML or the Neural Engine. The measured cold preload was about seven seconds. The app keeps Apple Speech as the installation-free default and reports a direct installation error if Nemotron assets are absent.
 
-For fixed Mandarin, select **中译英流式 / Apple Speech 中文**. Switching a fixed English native model to Chinese selects this native Chinese profile. Selecting automatic mode switches incompatible native models to **Whisper Small**. Explicitly selected Whisper models are preserved when changing languages. **Large-v3 Turbo** remains optional when its higher per-pass latency is acceptable. If Apple speech assets are unavailable or recognition is unsuitable for the content, manually select Whisper as the fallback.
+For fixed Mandarin, select **中译英流式 / Apple Speech 中文**. Switching a fixed English native model to Chinese selects this native Chinese profile. Selecting automatic mode switches incompatible native models to **中英自动流式 / Apple Speech 中英自动**. Explicitly selected Whisper models are preserved when changing languages. **Large-v3 Turbo** remains optional when its higher per-pass latency is acceptable. If Apple speech assets are unavailable or recognition is unsuitable for the content, manually select Whisper as the fallback.
 
 ## Data flow
 
@@ -198,6 +217,16 @@ python3 Tools/run_portable_tests.py
 ```
 
 This is not the Swift Testing runner. It reports the core test bodies it executes and the four excluded UI/shared-log files; full Xcode tests and real UI/capture checks remain separate.
+
+To check the phone microphone path (Google Chrome plays a 48 kHz 16-bit WAV as the phone's microphone; add `--public` to use the deployed relay and this Mac's relay configuration with an isolated keychain):
+
+```bash
+cd Relay && node --test server.test.mjs audio.test.mjs && cd ..
+node Relay/export-assets.mjs build/remote-relay/public
+node Relay/microphone.e2e.mjs build/remote-relay/public speech-48k.wav build/phone-mic/received.wav
+python3 Tools/build_local_tool.py Tools/PhoneMicrophoneProbe.swift build/phone-mic/PhoneMicrophoneProbe
+node Relay/phone-mac.e2e.mjs build/remote-relay/public build/phone-mic/PhoneMicrophoneProbe speech-48k.wav
+```
 
 To exercise the production Chinese recognizer, caption state and installed translation assets without capturing live audio:
 
@@ -284,7 +313,7 @@ StreamTranslateTests/       unit and integration tests
 
 ## Known limits
 
-- Apple streaming uses a fixed English or Mandarin locale, not automatic code-switching. Nemotron remains English-only; automatic routing uses Whisper.
+- Apple streaming recognizes English and Mandarin only. Automatic mode switches between them per utterance; a sentence that mixes both is written by whichever recognizer the arbiter selects. Nemotron remains English-only.
 - Nemotron is an optional Metal backend with about 1.05 GB measured process RSS versus 39 MB maximum RSS for the five-minute Apple benchmark. Semantic-normalized WER tied Apple on the five-voice synthetic set; the current evidence supports lower latency, not a general accuracy claim.
 - Overlapping speakers are mixed into one audio stream.
 - Vocabulary is recognition context, not a bilingual translation glossary.

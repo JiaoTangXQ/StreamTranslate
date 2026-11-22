@@ -3,6 +3,9 @@ import Foundation
 enum AudioInputSource: String, CaseIterable, Identifiable {
     case microphone
     case systemAudio
+    /// Audio uploaded from the paired phone page. Started from the phone,
+    /// never chosen as the Mac's own source and never persisted.
+    case phoneMicrophone
 
     var id: String { rawValue }
 
@@ -10,6 +13,7 @@ enum AudioInputSource: String, CaseIterable, Identifiable {
         switch self {
         case .microphone: return "麦克风"
         case .systemAudio: return "电脑音频"
+        case .phoneMicrophone: return "手机麦克风"
         }
     }
 
@@ -17,6 +21,7 @@ enum AudioInputSource: String, CaseIterable, Identifiable {
         switch self {
         case .microphone: return "收听这台 Mac 附近的说话声"
         case .systemAudio: return "收听电脑正在播放的声音"
+        case .phoneMicrophone: return "收听配对手机网页上传的声音"
         }
     }
 }
@@ -66,7 +71,7 @@ enum RecognitionLanguageMode: String, CaseIterable, Identifiable, Sendable {
     var detail: String {
         switch self {
         case .automatic:
-            return "每段独立判断中文或英文，适合双语交替。"
+            return "自动判断中文或英文，适合双语交替的内容。"
         case .chinese:
             return "固定按中文识别，避免短句被误判成其他语言。"
         case .english:
@@ -98,43 +103,6 @@ enum TranslationTarget: String, CaseIterable, Identifiable {
         case .traditionalChineseTaiwan: return "繁體中文（台灣）"
         }
     }
-}
-
-/// Non-linear choices keep short meetings responsive without making long
-/// sessions trigger needless model work. The cases are ordered by duration so
-/// the wheel always moves forward as it scrolls down.
-enum SummaryUpdateInterval: Int, CaseIterable, Identifiable, Hashable, Sendable {
-    case seconds30 = 30
-    case seconds50 = 50
-    case minute1 = 60
-    case seconds80 = 80
-    case minutes5 = 300
-    case minutes10 = 600
-    case minutes20 = 1_200
-    case minutes30 = 1_800
-    case hour1 = 3_600
-    case hours2 = 7_200
-
-    var id: Int { rawValue }
-
-    var duration: Duration { .seconds(Double(rawValue)) }
-
-    var displayName: String {
-        switch self {
-        case .seconds30: return "30 秒"
-        case .seconds50: return "50 秒"
-        case .minute1: return "1 分钟"
-        case .seconds80: return "80 秒"
-        case .minutes5: return "5 分钟"
-        case .minutes10: return "10 分钟"
-        case .minutes20: return "20 分钟"
-        case .minutes30: return "30 分钟"
-        case .hour1: return "1 小时"
-        case .hours2: return "2 小时"
-        }
-    }
-
-    var summaryDescription: String { "约 \(displayName)集中整理一次" }
 }
 
 struct ASRModel: Identifiable, Hashable {
@@ -193,6 +161,18 @@ struct ASRModel: Identifiable, Hashable {
             usesRollingAudioContext: false
         ),
         ASRModel(
+            id: bilingualAppleID,
+            backend: .appleSpeech,
+            priorityName: "中英自动流式",
+            name: "Apple Speech 中英自动",
+            size: "系统语言模型",
+            tradeoff: "中英两个流式识别器同时收听，自动选择语言；不重复识别",
+            firstPreviewInterval: 0,
+            subsequentPreviewInterval: 0,
+            maximumUtteranceDuration: 0,
+            usesRollingAudioContext: false
+        ),
+        ASRModel(
             id: "openai_whisper-small",
             backend: .whisperKit,
             priorityName: "速度优先",
@@ -218,7 +198,11 @@ struct ASRModel: Identifiable, Hashable {
         ),
     ]
 
-    static let defaultModel = available[1]
+    static let bilingualAppleID = "apple-speech-transcriber-auto"
+
+    static let defaultModel = available.first { $0.id == "apple-speech-transcriber-en" }!
+
+    static let bilingualApple = available.first { $0.id == bilingualAppleID }!
 
     static let whisperFallback = available.first {
         $0.id == "openai_whisper-small"
@@ -231,7 +215,12 @@ struct ASRModel: Identifiable, Hashable {
     var requiredRecognitionMode: RecognitionLanguageMode? {
         switch backend {
         case .nemotron: .english
-        case .appleSpeech: id == "apple-speech-transcriber-zh" ? .chinese : .english
+        case .appleSpeech:
+            switch id {
+            case "apple-speech-transcriber-zh": .chinese
+            case Self.bilingualAppleID: .automatic
+            default: .english
+            }
         case .whisperKit: nil
         }
     }
@@ -240,9 +229,11 @@ struct ASRModel: Identifiable, Hashable {
         requiredRecognitionMode == nil || requiredRecognitionMode == mode
     }
 
+    /// Automatic language uses continuous Apple streaming in both languages;
+    /// Whisper remains an explicit choice for other content.
     static func recommended(for mode: RecognitionLanguageMode) -> ASRModel {
         switch mode {
-        case .automatic: whisperFallback
+        case .automatic: bilingualApple
         case .english: defaultModel
         case .chinese: available.first { $0.id == "apple-speech-transcriber-zh" }!
         }
@@ -328,8 +319,16 @@ final class CaptionSettings {
         didSet { defaults.set(translationRefinementEnabled, forKey: "translationRefinementEnabled") }
     }
 
-    var summaryUpdateInterval: SummaryUpdateInterval {
-        didSet { defaults.set(summaryUpdateInterval.rawValue, forKey: "summaryUpdateInterval") }
+    /// Keep the mind map current while recording, even with its pane closed.
+    /// Only takes effect with a cloud summary provider.
+    var mindMapBackgroundUpdates: Bool {
+        didSet { defaults.set(mindMapBackgroundUpdates, forKey: Self.mindMapBackgroundKey) }
+    }
+
+    /// Lets a paired phone page send its microphone audio for recognition.
+    /// While on (with cross-network captions), the Mac avoids idle sleep.
+    var phoneMicrophoneEnabled: Bool {
+        didSet { defaults.set(phoneMicrophoneEnabled, forKey: Self.phoneMicrophoneKey) }
     }
 
     var captureDiagnosticsEnabled: Bool {
@@ -372,6 +371,7 @@ final class CaptionSettings {
         companionPeerToPeer = defaults.bool(forKey: "companionPeerToPeer")
         let savedAudioInput = defaults.string(forKey: "audioInputSource")
             .flatMap(AudioInputSource.init(rawValue:))
+            .flatMap { $0 == .phoneMicrophone ? nil : $0 }
         audioInputSource = savedAudioInput ?? .microphone
 
         let savedWidth = defaults.double(forKey: "panelWidth")
@@ -392,8 +392,8 @@ final class CaptionSettings {
         recognitionReviewEnabled = defaults.object(forKey: "recognitionReviewEnabled") as? Bool ?? true
         translationRefinementEnabled = defaults.object(forKey: "translationRefinementEnabled") as? Bool ?? true
 
-        let savedSummaryInterval = defaults.integer(forKey: "summaryUpdateInterval")
-        summaryUpdateInterval = SummaryUpdateInterval(rawValue: savedSummaryInterval) ?? .seconds30
+        mindMapBackgroundUpdates = defaults.object(forKey: Self.mindMapBackgroundKey) as? Bool ?? true
+        phoneMicrophoneEnabled = defaults.object(forKey: Self.phoneMicrophoneKey) as? Bool ?? true
 
         captureDiagnosticsEnabled = defaults.bool(forKey: "captureDiagnosticsEnabled")
 
@@ -419,5 +419,21 @@ final class CaptionSettings {
             selectedModelId = ASRModel.recommended(for: recognitionLanguageMode).id
             defaults.set(selectedModelId, forKey: "selectedModelId")
         }
+
+        // Automatic language used to fall back to Whisper snapshots, which cut
+        // continuous speech every 8 s and re-transcribe it repeatedly. Move that
+        // old automatic default to continuous Apple streaming once; a Whisper
+        // model chosen after this migration is preserved.
+        if !defaults.bool(forKey: Self.bilingualMigrationKey) {
+            if recognitionLanguageMode == .automatic, selectedModelId == ASRModel.whisperFallback.id {
+                selectedModelId = ASRModel.bilingualApple.id
+                defaults.set(selectedModelId, forKey: "selectedModelId")
+            }
+            defaults.set(true, forKey: Self.bilingualMigrationKey)
+        }
     }
+
+    static let bilingualMigrationKey = "automaticLanguageUsesAppleStreaming"
+    static let mindMapBackgroundKey = "mindMapBackgroundUpdates"
+    static let phoneMicrophoneKey = "phoneMicrophoneEnabled"
 }

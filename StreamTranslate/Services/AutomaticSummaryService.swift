@@ -18,7 +18,10 @@ import Foundation
     private var local: (any ConversationSummaryProviding)?
     private var cancelled = false
     private(set) var backendDescription: String
-    var usesLocalModel: Bool { local != nil || makeCloud == nil }
+    var usesCloud: Bool { makeCloud != nil && cooldown.allowsCloud }
+    /// True whenever the next request will run on this Mac.
+    var usesLocalModel: Bool { !usesCloud }
+    var inputBudget: Int { usesCloud ? CloudSummaryService.inputBudget : LocalSummaryService.inputBudget }
 
     convenience init(configuration: SummaryCloudConfiguration? = .load()) {
         self.init(makeCloud: configuration.map { config in { CloudSummaryService(configuration: config) } },
@@ -37,12 +40,12 @@ import Foundation
         if makeCloud == nil || !cooldown.allowsCloud { _ = try await prepareLocal() }
     }
 
-    func summarize(_ text: String, previous: String,
+    func summarize(_ request: MindMapRequest,
                    onUpdate: @escaping @MainActor (String) -> Void) async throws -> String {
-        try await summarize(text, previous: previous, validating: { _ in }, onUpdate: onUpdate)
+        try await summarize(request, validating: { _ in }, onUpdate: onUpdate)
     }
 
-    func summarize(_ text: String, previous: String,
+    func summarize(_ request: MindMapRequest,
                    validating validate: @escaping @MainActor (String) throws -> Void,
                    onUpdate: @escaping @MainActor (String) -> Void) async throws -> String {
         try checkCancellation()
@@ -53,13 +56,11 @@ import Foundation
             backendDescription = engine.backendDescription
             do {
                 try await engine.prepare()
-                let output = try await engine.summarize(text, previous: previous, onUpdate: onUpdate)
+                let output = try await engine.summarize(request, onUpdate: onUpdate)
                 try checkCancellation()
                 try validate(output)
                 cooldown.succeeded()
                 return output
-            } catch SummaryError.mapCapacityReached {
-                throw SummaryError.mapCapacityReached
             } catch {
                 engine.cancel(); cloud = nil
                 try checkCancellation()
@@ -68,10 +69,15 @@ import Foundation
                 AppLogger.log("Summary cloud unavailable; switching to local")
                 backendDescription = "AI 脑图 · 云端不可用，使用本地"
                 onUpdate("")
+                // A cloud-sized batch would overflow the local context. The
+                // caller re-splits it with the local budget now in effect.
+                if request.newText.count > LocalSummaryService.inputBudget {
+                    throw SummaryError.retryWithLocalBudget
+                }
             }
         }
         let engine = try await prepareLocal()
-        let output = try await engine.summarize(text, previous: previous, onUpdate: onUpdate)
+        let output = try await engine.summarize(request, onUpdate: onUpdate)
         try checkCancellation()
         try validate(output)
         return output

@@ -68,17 +68,18 @@ enum ConversationExportService {
     }
 
     static func mindMapHTML(_ map: ConversationMindMap) -> String {
-        let topics = map.topics.filter { $0.branches.contains { !$0.points.isEmpty } }.map { topic in
-            let kind = topic.kind == .advertisement ? "广告 / 赞助" : topic.kind.label
-            let branches = topic.branches.filter { !$0.points.isEmpty }.map { branch in
+        let topics = map.topics.filter { $0.pointCount > 0 }.map { topic in
+            let kind = topic.kind.label
+            let branches = topic.branches.map { branch in
                 let points = branch.points.map { point in
                     "<li><strong>\(point.text.htmlEscaped)</strong>\(point.detail.isEmpty ? "" : "<span>\(point.detail.htmlEscaped)</span>")</li>"
                 }.joined()
                 return "<section class=\"branch\"><h3>\(branch.title.htmlEscaped)<em>\(branch.points.count)</em></h3><ul>\(points)</ul></section>"
             }.joined(separator: "\n")
-            return "<article class=\"topic\"><div class=\"topic-heading\"><span class=\"topic-kind\">\(kind)</span><h2>\(topic.title.htmlEscaped)</h2></div>\(branches)</article>"
+            let summary = topic.summary.isEmpty ? "" : "<p class=\"topic-summary\">\(topic.summary.htmlEscaped)</p>"
+            return "<article class=\"topic\"><div class=\"topic-heading\"><span class=\"topic-kind\">\(kind)</span><h2>\(topic.title.htmlEscaped)</h2></div>\(summary)\(branches)</article>"
         }.joined(separator: "\n")
-        return document(title: "对话脑图", subtitle: "\(map.topics.count) 个主题 · \(map.topics.reduce(0) { $0 + $1.branches.reduce(0) { $0 + $1.points.count } }) 个节点", body: "<section class=\"mind-map\">\(topics)</section>")
+        return document(title: "对话脑图", subtitle: "\(map.topics.count) 个主题 · \(map.pointCount) 个节点", body: "<section class=\"mind-map\">\(topics)</section>")
     }
 
     private static func write(html: String, format: ConversationExportFormat, suggestedName: String) async throws -> URL {
@@ -146,6 +147,7 @@ enum ConversationExportService {
         .topic { padding:22px 24px 20px; margin:0 0 22px; border:1px solid var(--line); border-radius:14px; break-inside:avoid; }
         .topic-heading { display:flex; align-items:center; gap:10px; margin-bottom:16px; }
         .topic-heading h2 { margin:0; font-size:21px; letter-spacing:-.01em; }
+        .topic-summary { margin:-6px 0 12px; color:var(--muted); font-size:14px; }
         .topic-kind { color:var(--blue); background:var(--blue-soft); border-radius:999px; padding:3px 9px; font-size:11px; white-space:nowrap; }
         .branch { margin:13px 0 0 15px; padding-left:17px; border-left:2px solid #b8d4f2; break-inside:avoid; }
         .branch h3 { margin:0 0 5px; color:#2b6cae; font-size:14px; }

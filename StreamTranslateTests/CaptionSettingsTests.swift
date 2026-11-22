@@ -122,7 +122,7 @@ func makeTestDefaults(
     defaults.removeObject(forKey: "recognitionLanguageMode")
     defaults.removeObject(forKey: "recognitionVocabulary")
     defaults.removeObject(forKey: "captureDiagnosticsEnabled")
-    defaults.removeObject(forKey: "summaryUpdateInterval")
+    defaults.removeObject(forKey: CaptionSettings.mindMapBackgroundKey)
 
     let settings = CaptionSettings(defaults: defaults)
     #expect(settings.panelWidth == 620)
@@ -133,20 +133,18 @@ func makeTestDefaults(
     #expect(settings.recognitionLanguageMode == .english)
     #expect(settings.recognitionVocabulary.isEmpty)
     #expect(!settings.captureDiagnosticsEnabled)
-    #expect(settings.summaryUpdateInterval == .seconds30)
+    #expect(settings.mindMapBackgroundUpdates)
 }
 
-@Test @MainActor func summaryUpdateIntervalRoundTripsAndUsesNonLinearChoices() {
+@Test @MainActor func mindMapBackgroundPreferenceRoundTrips() {
     let defaults = makeTestDefaults()
     let settings = CaptionSettings(defaults: defaults)
-    settings.summaryUpdateInterval = .minutes20
+    settings.mindMapBackgroundUpdates = false
 
     let reloaded = CaptionSettings(defaults: defaults)
-    #expect(reloaded.summaryUpdateInterval == .minutes20)
-    #expect(SummaryUpdateInterval.allCases.map(\.rawValue) == [30, 50, 60, 80, 300, 600, 1_200, 1_800, 3_600, 7_200])
-    #expect(SummaryUpdateInterval.seconds80.summaryDescription == "约 80 秒集中整理一次")
+    #expect(!reloaded.mindMapBackgroundUpdates)
 
-    defaults.removeObject(forKey: "summaryUpdateInterval")
+    defaults.removeObject(forKey: CaptionSettings.mindMapBackgroundKey)
 }
 
 @Test @MainActor func recognitionVocabularyRoundTripPersistence() {
@@ -223,11 +221,12 @@ func makeTestDefaults(
     #expect(settings.recognitionLanguageMode == .chinese)
 }
 
-@Test @MainActor func automaticModeStillSelectsWhisperFallback() {
+@Test @MainActor func automaticModeSelectsContinuousBilingualStreaming() {
     let settings = CaptionSettings(defaults: makeTestDefaults())
     settings.recognitionLanguageMode = .chinese
     settings.recognitionLanguageMode = .automatic
-    #expect(settings.selectedModel.id == ASRModel.whisperFallback.id)
+    #expect(settings.selectedModel.id == ASRModel.bilingualAppleID)
+    #expect(settings.selectedModel.usesNativeStreaming)
     #expect(settings.recognitionLanguageMode == .automatic)
 }
 

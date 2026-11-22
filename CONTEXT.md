@@ -2,6 +2,97 @@
 
 ## Product boundary
 
+### Phone microphone through the encrypted relay (1.11.0 / build 30)
+
+A paired phone page can record a meeting and have the always-on Mac recognize,
+translate and map it; captions and the mind map return to the phone. The phone
+can only start `AudioInputSource.phoneMicrophone`, which is never persisted as
+the Mac's source. `PhoneMicrophoneCoordinator` refuses a new phone stream (with
+a notice shown on the phone) while the Mac records from its own source, is
+finalizing, is changing configuration, or recognition/translation is not ready;
+it never interrupts a Mac capture. A stream ends on the phone's end mark, after
+8 s without audio, or when the Mac stops; a language change on the Mac ends a
+phone capture instead of resuming it with the Mac microphone.
+
+Uplink: `Relay/mic-worklet.js` low-passes (31 taps, 7.2 kHz) and resamples to
+16 kHz mono Int16 in 1,600-sample frames. `remote.js` sends up to 1 s per
+HTTPS POST to `/api/audio`, sealed with AES-GCM under an HKDF key derived from
+the room key (info `StreamTranslate phone audio v1`); AAD binds room, stream
+and upload sequence (`PhoneAudioBatch` in CompanionKit). Each frame keeps its
+capture number; failed uploads (network, 503, 429) are retried in place, and
+at most 5 s is buffered. `PhoneAudioCaptureService` fills missing frames with
+silence (at most 2 s), drops repeats, and creates its stream at init so audio
+that arrives before recognition starts is kept. The Mac long-polls
+`/publisher/audio`.
+
+Pairing lasts 90 days (renewed below 80), at most 5 browsers. The Mac keeps the
+room, key and cookie hashes in the keychain (`remote-relay-room`) and
+re-registers them on `open`; the relay keeps them only in memory. `stop()`
+sends `offline` and keeps pairing; `revokeAllDevices()` creates a new room.
+Relay protocol 2 limits uploads to 192 KiB/s per browser and keeps the newest
+40 uploads per room. While 允许手机远程收音 (`phoneMicrophoneEnabled`, default
+on) and the relay run, the Mac holds an `idleSystemSleepDisabled` activity.
+Snapshots carry `mindMap` (deltas only when it changed), `phoneMicrophone` and
+`notice`; older payloads still decode. See `docs/phone-microphone-1.11.0.md`.
+Phone audio uses only the cross-network relay; the LAN modes are unchanged and
+LAN quick mode keeps its 12-hour limit. The 12-hour relay authorization in the
+1.5.x sections below is historical.
+
+### Automatic bilingual streaming and a merged, adaptive mind map (1.10.0 / build 29)
+
+Automatic language no longer means Whisper. `ASRModel.bilingualApple`
+(`apple-speech-transcriber-auto`) runs `BilingualStreamingTranscriptionService`:
+en_US and zh_CN `SpeechTranscriber`s receive every chunk once, in parallel.
+`BilingualRecognitionArbiter` forwards only the language being spoken. The
+zh_CN model is the detector (Han characters for Chinese speech, Latin words for
+English speech, already on volatile results); en_US final confidence is used
+for the first decision and to refuse a low-confidence English final once
+Chinese is indicated. A switch needs two agreeing zh_CN updates or one zh_CN
+final. Tokens covering audio already committed by the other language are
+trimmed by their `audioTimeRange`; finals from the inactive recognizer are kept
+(four per language) and replayed after a late switch. Nothing is resubmitted.
+Settings migrate the old automatic default (automatic + Whisper Small) once,
+keyed by `automaticLanguageUsesAppleStreaming`; Whisper chosen afterwards stays.
+Whisper remains selectable; its final pass no longer forces English and Chinese
+retries after Whisper rejected audio as non-speech, decode length is bounded by
+audio length, and subtitle-credit hallucinations are filtered.
+
+The 1.9.x append-only topic forest is replaced. Every update sends the current
+map (compact JSON with topic IDs), the last 240 characters already mapped, and
+the not-yet-mapped captions; the model returns only topics it adds or rewrites
+plus `remove`. A returned topic with an existing ID replaces that topic in
+place, so a story told in halves is merged and earlier mistakes are corrected;
+untouched topics keep content, IDs and order. `remove` is honored only when the
+same revision rewrote an existing topic (a merge). Bare removals and topics
+beyond the budget are folded, one line each, into a `更早的话题` overview topic,
+so long sessions never silently lose early content. Budgets (`MindMapLimits`)
+grow with session length (5/7/9/12 topics; 4 branches × 4 nodes; local model
+6 topics, 3 × 3). Oversized text and counts are clipped instead of rejecting
+the update. Each topic has a one-line `summary`. Every merged batch commits at
+once; long backlogs show the first map after one request.
+
+`MindMapCadence` replaces the fixed interval and its wheel picker: the first
+map appears after about 80 characters (or at once with the pane open); later
+updates wait for ≥40 new characters and an interval of session length / 12,
+clamped to 20 s–4 min and anchored to the last update; ≥2,500 new characters
+or opening the pane refresh after a 12 s minimum gap. With a cloud provider
+and `mindMapBackgroundUpdates` (default on), the map updates while recording
+even with the pane closed, so opening it shows a map. Without cloud, updates run
+only while the pane is open, as before. Cloud batches carry up to 6,000
+characters, local ones 1,200; a cloud failure on a larger batch re-splits it
+for the local model (`SummaryError.retryWithLocalBudget`). The cloud duplicate
+review request is removed. Local llama context is 6,144 with prompt caching.
+
+Diagnostics: `AppLogger` keeps one open 0600 handle, dates lines, rotates at
+10 MB and keeps the previous launch as `StreamTranslate.previous.log`; partial
+recognition text is no longer logged. `PipelineHealthMonitor` logs (no text)
+when audio stops arriving for 10 s, or when 20 s pass without a recognition
+result while audible audio keeps arriving, and how long the gap lasted. The
+live caption row is a separate view and completed rows are an equatable view,
+so recognizer updates no longer re-evaluate the 99-row history.
+See `docs/release-1.10.0.md` for measurements and limits. Older sections below
+are historical where they describe append-only maps or Whisper automatic mode.
+
 ### Structured conversation mind map (1.9.1 / build 28)
 
 The outline is now a connected topic → named branch → short-node diagram.
@@ -428,11 +519,12 @@ The project is local-first. `project.yml` is the XcodeGen source of truth. The 1
 
 `AudioCaptureService` produces ordered 16 kHz mono `CapturedAudioChunk` values. Microphone input uses AVAudioEngine conversion. System Audio uses ScreenCaptureKit and interprets each CMSampleBuffer through its Core Media audio format and AudioBufferList. Both capture paths have a three-second callback watchdog and recreate their capture object after a stall.
 
-Recognition has three explicit backends:
+Recognition has four explicit backends:
 
 1. Fixed English and Mandarin have distinct model profiles using `AppleStreamingTranscriptionService(language:)` (`en_US` / `zh_CN`). English remains the installation default. SpeechAnalyzer and SpeechTranscriber retain streaming state and receive each new chunk once. Volatile and final results retain their audio sample ranges. Apple model retention is `.whileInUse` so switching backends can release its model resources.
 2. Optional fixed-English `NemotronStreamingTranscriptionService` loads the pinned NeMo-Speech.cpp 0.1.0 C ABI at runtime and runs `nemotron-speech-streaming-en-0.6b` Q8 on the Metal GPU. The app does not bundle its 667 MiB model. Assets are installed under Application Support by a checksum-verifying script. Built-in non-VAD endpointing uses 1,200 ms; 800 ms was rejected after it split a test utterance and corrupted its continuation.
-3. Automatic or manually selected Whisper recognition uses `WhisperTranscriptionService` through WhisperKit/Core ML. `SpeechSegmenter` supplies pre-roll, adaptive energy gating, short-pause endpointing, preview cadence, and maximum utterance bounds. The event queue discards stale partial work. Explicit Whisper selections are preserved; incompatible native models follow language changes to the matching Apple profile or automatic Whisper fallback.
+3. Manually selected Whisper recognition uses `WhisperTranscriptionService` through WhisperKit/Core ML. `SpeechSegmenter` supplies pre-roll, adaptive energy gating, short-pause endpointing, preview cadence, and maximum utterance bounds. The event queue discards stale partial work. Explicit Whisper selections are preserved; incompatible native models follow language changes to the matching Apple profile, and automatic mode to bilingual Apple streaming.
+4. Automatic language uses `BilingualStreamingTranscriptionService`: Apple en_US and zh_CN streaming recognizers in parallel, arbitrated per utterance (see 1.10.0 above).
 
 All recognition paths feed `CaptionTextStabilizer`. A prefix stabilizes only after agreement from independent audio evidence. A contradictory hypothesis is held rather than spliced onto the old prefix; two independent audio updates may correct the prefix. `TranslationDraftPlanner` uses lexical word boundaries, keeps two words at the tail, and may advance at a complete clause. A useful short initial phrase can settle after 250 ms. It avoids unfinished numbers/connectives; this is a latency/semantic-stability tradeoff, not a promise that every first fragment is useful.
 

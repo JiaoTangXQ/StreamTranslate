@@ -16,13 +16,6 @@ struct CaptionAutoScrollState: Equatable {
     }
 }
 
-private struct FloatingCaptionContentRevision: Equatable {
-    let historyCount: Int
-    let historyRevision: Int
-    let original: String
-    let translation: String
-}
-
 struct FloatingCaptionView: View {
     @Environment(CaptionViewModel.self) private var viewModel
     @Environment(CaptionSettings.self) private var settings
@@ -48,17 +41,7 @@ struct FloatingCaptionView: View {
         controls.isVisible || !viewModel.isRecording || viewModel.isChangingCaptureConfiguration
     }
 
-    private static let chineseColor = Color(red: 0.47, green: 0.78, blue: 1.0)
     private static let bottomID = "floating-caption-bottom"
-
-    private var contentRevision: FloatingCaptionContentRevision {
-        FloatingCaptionContentRevision(
-            historyCount: viewModel.captionHistory.count,
-            historyRevision: viewModel.historyRevision,
-            original: viewModel.streamingOriginalText,
-            translation: viewModel.streamingTranslatedText
-        )
-    }
 
     private var transcript: some View {
         VStack(spacing: 0) {
@@ -76,23 +59,22 @@ struct FloatingCaptionView: View {
                                     .font(.caption).foregroundStyle(.white.opacity(0.65))
                             }
                         }
-                        // All completed captions (scrollable history)
-                        ForEach(viewModel.floatingCaptionHistory) { entry in
-                            let isLatest = entry.id == viewModel.captionHistory.last?.id
-                                && !viewModel.hasStreamingText
-                            captionPair(
-                                english: entry.englishText,
-                                chinese: entry.chineseText,
-                                sourceLanguage: entry.sourceLanguage,
-                                originalOpacity: isLatest ? 0.97 : 0.76,
-                                translationOpacity: isLatest ? 0.98 : 0.80
-                            )
-                            .id(entry.id)
-                        }
+                        // All completed captions (scrollable history). A
+                        // separate equatable view: streaming text changes
+                        // several times a second and must not re-evaluate
+                        // up to 99 completed rows each time.
+                        CaptionHistoryRows(
+                            entries: viewModel.floatingCaptionHistory,
+                            revision: viewModel.historyRevision,
+                            latestIsLive: !viewModel.hasStreamingText,
+                            fontSize: settings.fontSize
+                        )
+                        .equatable()
 
                         // Current streaming / completed line
                         if viewModel.hasStreamingText {
-                            streamingCaptionPair
+                            StreamingCaptionRow(proxy: proxy, follows: autoScrollState.shouldFollowContentChanges,
+                                                bottomID: Self.bottomID)
                             .id("streaming")
                         }
 
@@ -130,7 +112,7 @@ struct FloatingCaptionView: View {
                 .onChange(of: controlsHeight) {
                     if autoScrollState.shouldFollowContentChanges { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
                 }
-                .onChange(of: contentRevision) {
+                .onChange(of: viewModel.captionContentRevision) {
                     Task { @MainActor in
                         await Task.yield()
                         guard autoScrollState.shouldFollowContentChanges else {
@@ -326,8 +308,61 @@ struct FloatingCaptionView: View {
         return geometry.contentSize.height <= geometry.containerSize.height
             || geometry.visibleRect.maxY >= geometry.contentSize.height - tolerance
     }
+}
 
-    private var streamingCaptionPair: some View {
+private let captionTranslationColor = Color(red: 0.47, green: 0.78, blue: 1.0)
+
+/// Completed captions. Equatable on the history revision, so streaming text,
+/// hover and control fades do not rebuild every row.
+private struct CaptionHistoryRows: View, Equatable {
+    let entries: ArraySlice<CaptionEntry>
+    let revision: Int
+    let latestIsLive: Bool
+    let fontSize: CGFloat
+
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.revision == rhs.revision && lhs.entries.count == rhs.entries.count
+            && lhs.latestIsLive == rhs.latestIsLive && lhs.fontSize == rhs.fontSize
+            && lhs.entries.last?.id == rhs.entries.last?.id
+    }
+
+    var body: some View {
+        if !entries.isEmpty {
+            VStack(alignment: .leading, spacing: 18) {
+                ForEach(entries) { entry in
+                    let isLatest = latestIsLive && entry.id == entries.last?.id
+                    pair(entry, originalOpacity: isLatest ? 0.97 : 0.76, translationOpacity: isLatest ? 0.98 : 0.80)
+                        .id(entry.id)
+                }
+            }
+        }
+    }
+
+    private func pair(_ entry: CaptionEntry, originalOpacity: Double, translationOpacity: Double) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(entry.originalText)
+                .font(.system(size: fontSize))
+                .foregroundStyle(.white.opacity(originalOpacity))
+                .fixedSize(horizontal: false, vertical: true)
+            if !entry.translatedText.isEmpty {
+                Text(entry.translatedText)
+                    .font(.system(size: fontSize - 1))
+                    .foregroundStyle(captionTranslationColor.opacity(translationOpacity))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+}
+
+/// The only part of the transcript that changes on every recognizer update.
+private struct StreamingCaptionRow: View {
+    @Environment(CaptionViewModel.self) private var viewModel
+    @Environment(CaptionSettings.self) private var settings
+    let proxy: ScrollViewProxy
+    let follows: Bool
+    let bottomID: String
+
+    var body: some View {
         LiveCaptionTextView(
             original: viewModel.streamingOriginalText,
             stableOriginal: viewModel.streamingStableOriginal,
@@ -335,40 +370,14 @@ struct FloatingCaptionView: View {
             translation: viewModel.streamingTranslatedText,
             originalFontSize: settings.fontSize,
             translationFontSize: settings.fontSize - 1,
-            translationColor: Self.chineseColor.opacity(0.9)
+            translationColor: captionTranslationColor.opacity(0.9)
         )
-    }
-
-    private func captionPair(
-        english: String,
-        chinese: String,
-        sourceLanguage: SpokenLanguage,
-        originalOpacity: Double,
-        translationOpacity: Double
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            if sourceLanguage == .english {
-                Text(english)
-                    .font(.system(size: settings.fontSize))
-                    .foregroundStyle(.white.opacity(originalOpacity))
-                    .fixedSize(horizontal: false, vertical: true)
-                if !chinese.isEmpty {
-                    Text(chinese)
-                        .font(.system(size: settings.fontSize - 1))
-                        .foregroundStyle(Self.chineseColor.opacity(translationOpacity))
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            } else {
-                Text(chinese)
-                    .font(.system(size: settings.fontSize))
-                    .foregroundStyle(.white.opacity(originalOpacity))
-                    .fixedSize(horizontal: false, vertical: true)
-                if !english.isEmpty {
-                    Text(english)
-                        .font(.system(size: settings.fontSize - 1))
-                        .foregroundStyle(Self.chineseColor.opacity(translationOpacity))
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+        // Growing text can wrap onto a new line; keep the bottom in view.
+        .onChange(of: viewModel.streamingOriginalText + "\u{1F}" + viewModel.streamingTranslatedText) {
+            guard follows else { return }
+            Task { @MainActor in
+                await Task.yield()
+                proxy.scrollTo(bottomID, anchor: .bottom)
             }
         }
     }

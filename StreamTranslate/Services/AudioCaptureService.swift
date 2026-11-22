@@ -93,7 +93,7 @@ struct SystemAudioCaptureHealth: Sendable {
     }
 }
 
-final class AudioCaptureService: NSObject, @unchecked Sendable {
+final class AudioCaptureService: NSObject, AudioCaptureProviding, @unchecked Sendable {
     private static let targetSampleRate = 16_000.0
 
     private let source: AudioInputSource
@@ -139,6 +139,9 @@ final class AudioCaptureService: NSObject, @unchecked Sendable {
             try await startMicrophoneCapture()
         case .systemAudio:
             try await startSystemAudioCapture()
+        case .phoneMicrophone:
+            // Phone audio arrives through PhoneAudioCaptureService instead.
+            throw AudioCaptureError.microphoneUnavailable
         }
     }
 

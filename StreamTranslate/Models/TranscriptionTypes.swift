@@ -129,4 +129,17 @@ enum TranscriptionTextPolicy {
         ]
         return soundLabels.contains { value.contains($0) }
     }
+
+    /// Credits Whisper copies from its subtitle training data when it hears
+    /// music, applause or silence, e.g. "(字幕:J Chong)" or "字幕由Amara.org社区提供".
+    /// Ordinary speech that mentions subtitles is kept.
+    static func isKnownHallucination(_ text: String) -> Bool {
+        let value = text.lowercased()
+        let credits = ["amara.org", "j chong", "明镜与点点", "明鏡與點點", "请不吝点赞", "請不吝點贊", "点点栏目", "點點欄目"]
+        if credits.contains(where: { value.contains($0) }) { return true }
+        guard value.contains("字幕") else { return false }
+        let markers = ["(", "（", "cc by", "字幕君", "字幕組:", "字幕组:", "字幕組：", "字幕组：",
+                       "字幕由", "字幕提供", "字幕志愿者", "字幕志願者", "字幕補助", "字幕补助"]
+        return markers.contains { value.contains($0) }
+    }
 }

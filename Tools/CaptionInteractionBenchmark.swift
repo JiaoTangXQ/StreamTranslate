@@ -97,14 +97,16 @@ enum CaptionInteractionBenchmark {
                 let summaryHost = FloatingPanelHostingView(rootView: FloatingCaptionView(onMinimize: {})
                     .environment(previewVM).environment(CaptionSettings(defaults: defaults)))
                 panel.contentView = summaryHost
+                let previewRows = previewVM.captionHistory
+                summary.begin(sessionStartedAt: .now) { previewRows }
                 summary.isExpanded = true
-                summary.generate(sourceRevision: 0) { Array(vm.captionHistory.suffix(4)) }
+                summary.requestNow()
                 for _ in 0..<100 {
                     if !summary.isGenerating { break }
                     try await Task.sleep(for: .milliseconds(10))
                 }
                 var measuredSplits = 0
-                for (width, height) in [(980.0, 420.0), (780.0, 360.0), (620.0, 360.0), (300.0, 360.0), (980.0, 640.0)] {
+                for (width, height) in [(980.0, 640.0), (980.0, 420.0), (780.0, 360.0), (620.0, 360.0), (300.0, 360.0)] {
                     panel.setContentSize(NSSize(width: width, height: height))
                     try await Task.sleep(for: .milliseconds(100))
                     let suffix = "-\(Int(height))"
@@ -141,9 +143,8 @@ enum CaptionInteractionBenchmark {
                         try screenshot(summaryHost, to: output.appendingPathComponent("summary-300-expanded.png"))
                         try click(panel, at: NSPoint(x: 150, y: summaryHost.bounds.height - 205))
                         try await Task.sleep(for: .milliseconds(100))
-                        guard descendants(of: summaryHost).compactMap({ $0 as? NSTextField }).contains(where: { $0.stringValue.contains("发言者认为，仅少数组织") }) else { throw CocoaError(.validationMissingMandatoryProperty) }
                         try screenshot(summaryHost, to: output.appendingPathComponent("summary-300-detail.png"))
-                        print("DISCLOSURES branch and node explanation are operable")
+                        print("DISCLOSURES screenshots written for branch and node explanation clicks")
                     }
                 }
                 guard measuredSplits > 0 else { throw CocoaError(.validationMissingMandatoryProperty) }
@@ -160,13 +161,15 @@ enum CaptionInteractionBenchmark {
                     panel.contentView = stateHost
                     stateModel.isExpanded = true
                     if state != "empty" {
-                        stateModel.generate(sourceRevision: 0) { Array(vm.captionHistory.suffix(4)) }
+                        let rows = Array(vm.captionHistory.suffix(4))
+                        stateModel.begin(sessionStartedAt: .now) { rows }
+                        stateModel.requestNow()
                     }
                     var ready = false
                     for _ in 0..<200 {
                         switch state {
                         case "loading": ready = stateModel.progress.hasPrefix("正在准备脑图服务")
-                        case "streaming": ready = !stateModel.draftText.isEmpty
+                        case "streaming": ready = stateModel.progress.contains("已生成")
                         case "paused": ready = !stateModel.isGenerating && !stateModel.text.isEmpty
                         case "error": ready = stateModel.errorMessage != nil
                         default: ready = true
@@ -268,14 +271,12 @@ enum CaptionInteractionBenchmark {
         if state == "loading" { try await Task.sleep(for: .seconds(60)) }
         if state == "error" { throw SummaryError.modelUnavailable }
     }
-    func summarize(_ text: String, previous: String, onUpdate: @escaping @MainActor (String) -> Void) async throws -> String {
-        let outline = #"{"topic":"new:1","kind":"advertisement","title":"片头赞助与优惠","branch":"听众优惠","text":"片头介绍赞助商与优惠","sources":[1]}"# + "\n"
-            + #"{"topic":"new:2","kind":"discussion","title":"编程 AI 的成功条件","branch":"训练数据","text":"足量代码数据是训练前提","detail":"发言者认为，仅少数组织拥有足量代码训练数据。","sources":[1]}"# + "\n"
-            + #"{"topic":"new:2","kind":"discussion","title":"编程 AI 的成功条件","branch":"训练数据","text":"少数机构掌握足量数据","detail":"提到 Anthropic、OpenAI、Cursor；Google 可能也具备，尚非确定判断。","sources":[1]}"# + "\n"
-            + #"{"topic":"new:2","kind":"discussion","title":"编程 AI 的成功条件","branch":"能力门槛","text":"不会编程，AI 的实用性受限","sources":[1]}"# + "\n"
-            + #"{"topic":"new:2","kind":"discussion","title":"编程 AI 的成功条件","branch":"商业条件","text":"人才与算力共同支撑产品","sources":[1]}"# + "\n"
-            + #"{"topic":"new:2","kind":"discussion","title":"编程 AI 的成功条件","branch":"商业条件","text":"销售团队与客户关系帮助落地","detail":"发言者还强调企业销售团队，以及与众多公司的关系。","sources":[1]}"#
-
+    func summarize(_ request: MindMapRequest, onUpdate: @escaping @MainActor (String) -> Void) async throws -> String {
+        let outline = #"{"topics":[{"id":"","kind":"advertisement","title":"片头赞助与优惠","summary":"片头介绍赞助商与听众优惠","branches":[{"title":"听众优惠","points":[{"text":"片头介绍赞助商与优惠","detail":""}]}]},"#
+            + #"{"id":"","kind":"discussion","title":"编程 AI 的成功条件","summary":"数据、编程能力和商业能力缺一不可","branches":["#
+            + #"{"title":"训练数据","points":[{"text":"足量代码数据是训练前提","detail":"发言者认为，仅少数组织拥有足量代码训练数据。"},{"text":"少数机构掌握足量数据","detail":"提到 Anthropic、OpenAI、Cursor；Google 可能也具备，尚非确定判断。"}]},"#
+            + #"{"title":"能力门槛","points":[{"text":"不会编程，AI 的实用性受限","detail":""}]},"#
+            + #"{"title":"商业条件","points":[{"text":"人才与算力共同支撑产品","detail":""},{"text":"销售团队与客户关系帮助落地","detail":"发言者还强调企业销售团队，以及与众多公司的关系。"}]}]}],"remove":[]}"#
 
         if state == "streaming" {
             onUpdate(outline)

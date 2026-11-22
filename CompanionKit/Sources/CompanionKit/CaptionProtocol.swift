@@ -38,27 +38,81 @@ public enum CompanionEngineStatus: String, Codable, Sendable {
     }
 }
 
+/// Whether the Mac currently accepts or uses audio sent from the phone page.
+public enum CompanionPhoneMicrophone: String, Codable, Sendable {
+    /// The Mac does not accept phone audio (setting off or relay only).
+    case unavailable
+    /// Phone audio would start recognition on the Mac.
+    case ready
+    /// The Mac is recognizing audio from the phone.
+    case listening
+    /// The Mac refused this phone stream; see the snapshot notice.
+    case refused
+}
+
+/// The Mac's current mind map, reduced to what a phone shows.
+public struct CompanionMindMap: Codable, Equatable, Sendable {
+    public struct Branch: Codable, Equatable, Sendable {
+        public var title: String
+        public var points: [String]
+        public init(title: String, points: [String]) {
+            self.title = String(title.prefix(32)); self.points = points.prefix(8).map { String($0.prefix(160)) }
+        }
+    }
+    public struct Topic: Codable, Equatable, Sendable {
+        public var title: String
+        public var summary: String
+        public var advertisement: Bool
+        public var branches: [Branch]
+        public init(title: String, summary: String, advertisement: Bool, branches: [Branch]) {
+            self.title = String(title.prefix(48)); self.summary = String(summary.prefix(120))
+            self.advertisement = advertisement; self.branches = Array(branches.prefix(8))
+        }
+    }
+    public static let maximumTopics = 16
+    public var revision: Int
+    public var topics: [Topic]
+    public init(revision: Int, topics: [Topic]) {
+        self.revision = revision; self.topics = Array(topics.prefix(Self.maximumTopics))
+    }
+    public var isValid: Bool {
+        topics.count <= Self.maximumTopics && topics.allSatisfy { topic in
+            topic.title.count <= 48 && topic.summary.count <= 120 && topic.branches.count <= 8
+                && topic.branches.allSatisfy { $0.title.count <= 32 && $0.points.count <= 8 && $0.points.allSatisfy { $0.count <= 160 } }
+        }
+    }
+}
+
 public struct CompanionSnapshot: Codable, Equatable, Sendable {
     public var sessionID: UUID
     public var sequence: UInt64
     public var captions: [CompanionCaption]
     public var streaming: CompanionCaption?
     public var status: CompanionEngineStatus
+    /// Optional fields added in 1.11; older readers ignore them.
+    public var mindMap: CompanionMindMap?
+    public var phoneMicrophone: CompanionPhoneMicrophone?
+    public var notice: String?
 
     public init(sessionID: UUID = UUID(), sequence: UInt64 = 0,
                 captions: [CompanionCaption] = [], streaming: CompanionCaption? = nil,
-                status: CompanionEngineStatus = .ready) {
+                status: CompanionEngineStatus = .ready, mindMap: CompanionMindMap? = nil,
+                phoneMicrophone: CompanionPhoneMicrophone? = nil, notice: String? = nil) {
         self.sessionID = sessionID
         self.sequence = sequence
         self.captions = Array(captions.suffix(CompanionLimits.maximumHistory))
         self.streaming = streaming
         self.status = status
+        self.mindMap = mindMap
+        self.phoneMicrophone = phoneMicrophone
+        self.notice = notice.map { String($0.prefix(200)) }
     }
 
     public func isValid() -> Bool {
         let rows = captions + (streaming.map { [$0] } ?? [])
         return captions.count <= CompanionLimits.maximumHistory
             && Set(captions.map(\.id)).count == captions.count
+            && (mindMap?.isValid ?? true) && (notice?.count ?? 0) <= 200
             && rows.allSatisfy {
                 $0.original.count <= CompanionLimits.maximumTextCharacters
                     && $0.translation.count <= CompanionLimits.maximumTextCharacters
@@ -74,6 +128,10 @@ public struct CompanionDelta: Codable, Equatable, Sendable {
     public var retainedIDs: [UUID]
     public var streaming: CompanionCaption?
     public var status: CompanionEngineStatus
+    /// Present only when the map changed; absent means "unchanged".
+    public var mindMap: CompanionMindMap?
+    public var phoneMicrophone: CompanionPhoneMicrophone?
+    public var notice: String?
 
     public init(previous: CompanionSnapshot, current: CompanionSnapshot) {
         sessionID = current.sessionID
@@ -83,6 +141,9 @@ public struct CompanionDelta: Codable, Equatable, Sendable {
         retainedIDs = current.captions.map(\.id)
         streaming = current.streaming
         status = current.status
+        mindMap = current.mindMap == previous.mindMap ? nil : current.mindMap
+        phoneMicrophone = current.phoneMicrophone
+        notice = current.notice
     }
 }
 
@@ -112,7 +173,9 @@ public struct CompanionReplica: Sendable {
         let ordered = delta.retainedIDs.compactMap { rows[$0] }
         guard ordered.count == delta.retainedIDs.count else { return false }
         let next = CompanionSnapshot(sessionID: delta.sessionID, sequence: delta.sequence,
-                                     captions: ordered, streaming: delta.streaming, status: delta.status)
+                                     captions: ordered, streaming: delta.streaming, status: delta.status,
+                                     mindMap: delta.mindMap ?? previous.mindMap,
+                                     phoneMicrophone: delta.phoneMicrophone, notice: delta.notice)
         return accept(next)
     }
 }

@@ -45,8 +45,9 @@ struct SummaryCloudConfiguration: Sendable {
               let model = values["OPENAI_MODEL"], !model.isEmpty else { return nil }
         provider = rawProvider.lowercased()
         baseURL = url; apiKey = key; self.model = model
-        // Eight compact additions do not need a 32K response budget.
-        maxTokens = min(2_048, max(256, Int(values["CHAT_COMPLETIONS_MAX_TOKENS"] ?? "") ?? 2_048))
+        // A revision rewrites only the topics it touches, but merging several
+        // halves of a long session can exceed 2K tokens.
+        maxTokens = min(4_096, max(512, Int(values["CHAT_COMPLETIONS_MAX_TOKENS"] ?? "") ?? 4_096))
         requestsPerSecond = min(20, max(0.1, Double(values["CHAT_COMPLETIONS_REQUESTS_PER_SECOND"] ?? "") ?? 1))
     }
 

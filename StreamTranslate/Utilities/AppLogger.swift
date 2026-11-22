@@ -2,7 +2,15 @@ import Foundation
 
 /// Writes logs to ~/Library/Logs/StreamTranslate.log for easy debugging.
 /// Usage: AppLogger.log("message") or AppLogger.log("context", "detail")
+///
+/// Called from the main actor during capture, so a line is one write on a
+/// handle that stays open (not open/seek/write/close per line). The file is
+/// private to the user because finals and translations are logged.
 enum AppLogger {
+    private static let maximumBytes: UInt64 = 10 * 1_024 * 1_024
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var handle: FileHandle?
+
     private static let logURL: URL = {
         let logs = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first!
             .appendingPathComponent("Logs")
@@ -10,34 +18,68 @@ enum AppLogger {
         return logs.appendingPathComponent("StreamTranslate.log")
     }()
 
+    private static var previousURL: URL {
+        logURL.deletingLastPathComponent().appendingPathComponent("StreamTranslate.previous.log")
+    }
+
     private static let formatter: DateFormatter = {
         let f = DateFormatter()
-        f.dateFormat = "HH:mm:ss.SSS"
+        f.dateFormat = "MM-dd HH:mm:ss.SSS"
         return f
     }()
 
     static func log(_ items: Any...) {
-        let timestamp = formatter.string(from: Date())
         let message = items.map { "\($0)" }.joined(separator: " ")
-        let line = "[\(timestamp)] \(message)\n"
-
-        if let data = line.data(using: .utf8) {
-            if FileManager.default.fileExists(atPath: logURL.path) {
-                if let handle = try? FileHandle(forWritingTo: logURL) {
-                    handle.seekToEndOfFile()
-                    handle.write(data)
-                    handle.closeFile()
-                }
-            } else {
-                try? data.write(to: logURL)
-            }
+        lock.withLock {
+            let line = "[\(formatter.string(from: Date()))] \(message)\n"
+            guard let handle = openHandle() else { return }
+            handle.write(Data(line.utf8))
+            if handle.offsetInFile > maximumBytes { rotateLocked() }
         }
     }
 
-    /// Clear the log file (call on app launch)
+    /// Clear the log file.
     static func clear() {
-        try? "".write(to: logURL, atomically: true, encoding: .utf8)
+        lock.withLock {
+            closeLocked()
+            try? Data().write(to: logURL)
+            restrictPermissions()
+        }
+    }
+
+    /// Keep the previous launch's log so a stall or crash can still be read
+    /// after the app is reopened, then start an empty log.
+    static func startNewLaunch() {
+        lock.withLock { rotateLocked() }
     }
 
     static var path: String { logURL.path }
+
+    private static func openHandle() -> FileHandle? {
+        if let handle { return handle }
+        if !FileManager.default.fileExists(atPath: logURL.path) {
+            FileManager.default.createFile(atPath: logURL.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        }
+        restrictPermissions()
+        let opened = try? FileHandle(forWritingTo: logURL)
+        opened?.seekToEndOfFile()
+        handle = opened
+        return opened
+    }
+
+    private static func rotateLocked() {
+        closeLocked()
+        try? FileManager.default.removeItem(at: previousURL)
+        try? FileManager.default.moveItem(at: logURL, to: previousURL)
+        FileManager.default.createFile(atPath: logURL.path, contents: nil, attributes: [.posixPermissions: 0o600])
+    }
+
+    private static func closeLocked() {
+        try? handle?.close()
+        handle = nil
+    }
+
+    private static func restrictPermissions() {
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: logURL.path)
+    }
 }

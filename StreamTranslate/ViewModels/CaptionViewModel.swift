@@ -185,8 +185,8 @@ final class CaptionViewModel {
     var downloadProgress: Double?
     var downloadError: String?
 
-    var streamingEnglish = ""
-    var streamingChinese = ""
+    var streamingEnglish = "" { didSet { updateStreamingFlag() } }
+    var streamingChinese = "" { didSet { updateStreamingFlag() } }
     var streamingSourceLanguage: SpokenLanguage = .english
     var streamingWords: [WordTimestamp] = []
     var streamingStableOriginal = ""
@@ -200,6 +200,7 @@ final class CaptionViewModel {
     let historyStore: CaptionHistoryStore?
     let conversationSummary: ConversationSummaryModel
     private(set) var conversationSourceRevision = 0
+    @ObservationIgnored private var sessionSourceCharacters = 0
     @ObservationIgnored private var captionArchiveSessions: [UUID: (UUID, Date)] = [:]
     @ObservationIgnored private var captionWorkCounts: [UUID: Int] = [:]
     @ObservationIgnored private var retainedCaptionUpdates: [UUID: CaptionEntry] = [:]
@@ -210,8 +211,13 @@ final class CaptionViewModel {
 
     let translationService = TranslationService()
 
-    var hasStreamingText: Bool {
-        !streamingEnglish.isEmpty || !streamingChinese.isEmpty
+    /// Stored separately so views that only care whether a live line exists
+    /// do not re-render on every recognizer update of its text.
+    private(set) var hasStreamingText = false
+
+    private func updateStreamingFlag() {
+        let streaming = !streamingEnglish.isEmpty || !streamingChinese.isEmpty
+        if hasStreamingText != streaming { hasStreamingText = streaming }
     }
 
     var streamingOriginalText: String {
@@ -231,7 +237,11 @@ final class CaptionViewModel {
     }
 
     private let maxRecentCaptions = 2
-    private var audioCaptureService: AudioCaptureService?
+    private var audioCaptureService: (any AudioCaptureProviding)?
+    /// Set by the phone coordinator before it starts a phone-audio capture.
+    var phoneAudioProvider: PhoneAudioCaptureService?
+    /// The source of the capture now running, nil when stopped.
+    private(set) var activeCaptureSource: AudioInputSource?
     private var sessionLogger: MeetingSessionLogger?
     private var transcriptionService: WhisperTranscriptionService?
     private var streamingTranscriptionService: (any StreamingTranscriptionProviding)?
@@ -257,6 +267,8 @@ final class CaptionViewModel {
     private var refinementContextStart: Date = .distantFuture
     private var memoryPressureMonitor: (any DispatchSourceMemoryPressure)?
     private var memoryPressureMonitorID: UUID?
+    private var pipelineHealth: PipelineHealthMonitor?
+    private var pipelineHealthTask: Task<Void, Never>?
     private var cleanupTask: Task<Void, Never>?
     private var readyTranslationDirections: Set<TranslationDirection> = []
     private var transcriptionContext = TranscriptionContext()
@@ -278,7 +290,10 @@ final class CaptionViewModel {
 
     init(historyStore: CaptionHistoryStore? = nil, conversationSummary: ConversationSummaryModel? = nil) {
         self.historyStore = historyStore
-        self.conversationSummary = conversationSummary ?? ConversationSummaryModel()
+        self.conversationSummary = conversationSummary ?? ConversationSummaryModel { AutomaticSummaryService() }
+        self.conversationSummary.begin(sessionStartedAt: .now) { [weak self] in
+            try await self?.currentSessionCaptions() ?? []
+        }
     }
 
     func preloadModel(modelId: String = ASRModel.defaultModel.id) {
@@ -313,6 +328,12 @@ final class CaptionViewModel {
                 case .nemotron:
                     AppLogger.log("Loading Nemotron streaming English model")
                     let service = try await NemotronStreamingTranscriptionService.load()
+                    streamingTranscriptionService = service
+                    transcriptionService = nil
+                case .appleSpeech where model.requiredRecognitionMode == .automatic:
+                    AppLogger.log("Preparing Apple streaming English + Chinese models")
+                    let service = BilingualStreamingTranscriptionService()
+                    try await service.prepare()
                     streamingTranscriptionService = service
                     transcriptionService = nil
                 case .appleSpeech:
@@ -418,39 +439,36 @@ final class CaptionViewModel {
     }
 
     func beginCompanionSession() {
-        conversationSummary.reset()
         conversationSourceRevision = 0
+        sessionSourceCharacters = 0
         companionSessionID = UUID()
         companionSessionStartedAt = .now
+        conversationSummary.begin(sessionStartedAt: companionSessionStartedAt) { [weak self] in
+            try await self?.currentSessionCaptions() ?? []
+        }
     }
 
     func expandConversationSummary() {
-        conversationSummary.isExpanded = true
-        resumeConversationSummary()
+        conversationSummary.expand()
     }
 
     func resumeConversationSummary() {
         conversationSummary.resumeAutomaticUpdates()
-        requestConversationSummary(automatically: true, immediately: true)
     }
 
-    func requestConversationSummary(automatically: Bool = false, immediately: Bool = false) {
-        if automatically && (!conversationSummary.isExpanded || !conversationSummary.isAutoUpdating) { return }
-        let sessionID = companionSessionID
-        let startedAt = companionSessionStartedAt
-        let store = historyStore
-        let fallback = captionHistory.filter { $0.timestamp >= startedAt }
-        let load: @MainActor () async throws -> [CaptionEntry] = {
-            if let store {
-                guard store.errorMessage == nil else { throw SummaryError.historyUnavailable }
-                return try await store.captions(in: sessionID)
-            }
-            return fallback
-        }
+    /// Manual "整理一次", or an automatic check after captions changed.
+    func requestConversationSummary(automatically: Bool = false) {
         if automatically {
-            conversationSummary.scheduleAutomaticUpdate(sourceRevision: conversationSourceRevision,
-                immediately: immediately, load: load)
-        } else { conversationSummary.generate(sourceRevision: conversationSourceRevision, load: load) }
+            conversationSummary.sourceDidChange(characters: sessionSourceCharacters)
+        } else {
+            conversationSummary.requestNow()
+        }
+    }
+
+    /// Background mind-map updates follow recording and the user's setting.
+    private func updateMindMapBackground() {
+        let enabled = UserDefaults.standard.object(forKey: CaptionSettings.mindMapBackgroundKey) as? Bool ?? true
+        conversationSummary.backgroundUpdatesRequested = isRecording && enabled
     }
 
     /// Returns the complete active session for export. The floating window is
@@ -506,13 +524,19 @@ final class CaptionViewModel {
                                     mode: RecognitionLanguageMode? = nil) {
         guard !isChangingCaptureConfiguration, !isStartingCapture,
               !isFinalizingCapture, !isLoading else { return }
-        guard (source != nil && source != settings.audioInputSource)
+        let phoneCapture = activeCaptureSource == .phoneMicrophone
+        guard (source != nil && (source != settings.audioInputSource || phoneCapture))
                 || (mode != nil && mode != settings.recognitionLanguageMode) else { return }
         let wasRecording = isRecording
+        // A phone capture's audio stream ends with the stop, so a language
+        // change finishes it and the phone offers to start again; picking a
+        // Mac source switches to that source.
+        let resumes = wasRecording && (!phoneCapture || source != nil)
         isChangingCaptureConfiguration = true
-        quickControlMessage = wasRecording ? "正在收尾并切换，音频会短暂中断…" : "正在应用选择…"
+        quickControlMessage = resumes ? "正在收尾并切换，音频会短暂中断…"
+            : wasRecording ? "正在结束手机收音并应用选择，之后可在手机上重新开始…" : "正在应用选择…"
         if wasRecording { stopCapture() }
-        quickResumeRequested = wasRecording
+        quickResumeRequested = resumes
         Task { @MainActor in
             defer { isChangingCaptureConfiguration = false; quickResumeRequested = false }
             await captureStopTask?.value
@@ -622,16 +646,24 @@ final class CaptionViewModel {
                 }
             }
 
-            let audioService = AudioCaptureService(
-                source: source,
-                sessionLogger: logger
-            )
+            let audioService: any AudioCaptureProviding
+            if source == .phoneMicrophone {
+                guard let phone = phoneAudioProvider else {
+                    statusMessage = "手机音频不可用"
+                    return
+                }
+                audioService = phone
+            } else {
+                audioService = AudioCaptureService(source: source, sessionLogger: logger)
+            }
             let audioStream = audioService.makeAudioStream()
             audioCaptureService = audioService
             sessionLogger = logger
-            statusMessage = source == .microphone
-                ? "Starting microphone capture..."
-                : "Starting system audio capture..."
+            statusMessage = switch source {
+            case .microphone: "Starting microphone capture..."
+            case .systemAudio: "Starting system audio capture..."
+            case .phoneMicrophone: "正在接收手机声音…"
+            }
             AppLogger.log("Starting audio capture: \(source.rawValue)")
 
             try await audioService.start()
@@ -645,12 +677,14 @@ final class CaptionViewModel {
             // A separate user-started recording keeps the existing fresh-session boundary.
             if !isChangingCaptureConfiguration { beginCompanionSession() }
             isRecording = true
+            activeCaptureSource = source
+            updateMindMapBackground()
             statusMessage = ""
             transcriptionContext.reset()
             activeRecognitionVocabulary = recognitionVocabulary
-            let effectiveSensitivity: SpeechDetectionSensitivity = source == .microphone
-                ? sensitivity
-                : .automatic
+            let effectiveSensitivity: SpeechDetectionSensitivity = source == .systemAudio
+                ? .automatic
+                : sensitivity
             AppLogger.log(
                 "Audio capture started: \(source.rawValue), "
                     + "speech detection=\(effectiveSensitivity.rawValue), "
@@ -681,7 +715,10 @@ final class CaptionViewModel {
         }
 
         isRecording = false
+        activeCaptureSource = nil
         finalizingCaptureGeneration = nil
+        stopPipelineHealthMonitor()
+        updateMindMapBackground()
         memoryPressureMonitor?.cancel()
         memoryPressureMonitor = nil
         memoryPressureMonitorID = nil
@@ -727,7 +764,10 @@ final class CaptionViewModel {
         guard isRecording, !isFinalizingCapture else { return }
         finalizingCaptureGeneration = captureStartGeneration - 1
         isRecording = false
+        activeCaptureSource = nil
         isFinalizingCapture = true
+        stopPipelineHealthMonitor()
+        updateMindMapBackground()
         statusMessage = "Finalizing last words..."
 
         let service = audioCaptureService
@@ -788,6 +828,7 @@ final class CaptionViewModel {
         recognitionMode: RecognitionLanguageMode
     ) {
         startMemoryPressureMonitor()
+        let audioStream = startPipelineHealthMonitor(for: audioStream)
         if UserDefaults.standard.object(forKey: "translationRefinementEnabled") as? Bool != false,
            LocalHYTranslationService.isInstalled {
             let refiner = LocalHYTranslationService()
@@ -806,6 +847,51 @@ final class CaptionViewModel {
             sensitivity: sensitivity,
             recognitionMode: recognitionMode
         )
+    }
+
+    /// Passes audio through unchanged while recording delivery and loudness,
+    /// so an intermittent caption gap leaves a log line that says whether
+    /// audio stopped arriving or recognition stopped producing results.
+    private func startPipelineHealthMonitor(
+        for audioStream: AsyncStream<CapturedAudioChunk>
+    ) -> AsyncStream<CapturedAudioChunk> {
+        let health = PipelineHealthMonitor()
+        pipelineHealth = health
+        let backend = activeModel.id
+        let logger = sessionLogger
+        pipelineHealthTask?.cancel()
+        pipelineHealthTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(5)) } catch { return }
+                guard let self, self.isRecording, self.pipelineHealth === health,
+                      let report = health.check() else { continue }
+                AppLogger.log("Pipeline health [\(backend)]: \(report.message)")
+                logger?.recordPipelineStatus("pipeline_health", detail: report.message)
+            }
+        }
+        return AsyncStream { continuation in
+            let forward = Task {
+                for await chunk in audioStream {
+                    health.audio(chunk.samples)
+                    continuation.yield(chunk)
+                }
+                continuation.finish()
+            }
+            continuation.onTermination = { @Sendable _ in forward.cancel() }
+        }
+    }
+
+    private func noteRecognitionResult() {
+        if let report = pipelineHealth?.recognized() {
+            AppLogger.log("Pipeline health [\(activeModel.id)]: \(report.message)")
+            sessionLogger?.recordPipelineStatus("pipeline_health", detail: report.message)
+        }
+    }
+
+    private func stopPipelineHealthMonitor() {
+        pipelineHealthTask?.cancel()
+        pipelineHealthTask = nil
+        pipelineHealth = nil
     }
 
     private func runNativeStreamingPipeline(
@@ -1009,6 +1095,7 @@ final class CaptionViewModel {
                 return
             }
             transcriptionContext.recordPartial(segment: segment, output: output)
+            noteRecognitionResult()
             logger?.recordRecognition(
                 "partial_recognized",
                 segment: segment,
@@ -1023,9 +1110,6 @@ final class CaptionViewModel {
                 segment: segment,
                 direction: direction,
                 partialTranslations: partialTranslations
-            )
-            AppLogger.log(
-                "Partial \(output.language.rawValue) (reported \(output.reportedLanguageCode)): \(output.text)"
             )
         } catch is CancellationError {
             return
@@ -1053,6 +1137,7 @@ final class CaptionViewModel {
             endSample: update.endSample
         )
         let stage = update.isFinal ? "final_recognized" : "partial_recognized"
+        noteRecognitionResult()
         logger?.recordRecognition(
             stage,
             segment: segment,
@@ -1115,9 +1200,6 @@ final class CaptionViewModel {
                 await self.submitPartialTranslation(settled, queue: partialTranslations)
             }
         }
-        AppLogger.log(
-            "Partial \(output.language.rawValue) (reported \(output.reportedLanguageCode)): \(output.text)"
-        )
     }
 
     private func schedulePartialTranslation(
@@ -1256,6 +1338,7 @@ final class CaptionViewModel {
                 return
             }
             transcriptionContext.recordFinal(segment: segment, output: output)
+            noteRecognitionResult()
             logger?.recordRecognition(
                 "final_recognized",
                 segment: segment,
@@ -1817,9 +1900,13 @@ final class CaptionViewModel {
             prompt: activeRecognitionVocabulary.nilIfBlank,
             pass: pass
         )
+        // A nil result means Whisper itself rejected the audio as non-speech
+        // or a hallucination. Forcing English and then Chinese on that audio
+        // costs two more full passes and mostly returns subtitle-credit
+        // hallucinations, so only an unsupported-language guess is retried.
         if allowsRecoveryRetries,
-           automatic == nil
-            || TranscriptionSelectionPolicy.shouldRetryUnsupportedLanguage(automatic) {
+           automatic != nil,
+           TranscriptionSelectionPolicy.shouldRetryUnsupportedLanguage(automatic) {
             let english = try await transcription.transcribe(
                 segment.samples,
                 languageHint: .english
@@ -1957,7 +2044,11 @@ final class CaptionViewModel {
     }
 
     private func appendCaption(_ entry: CaptionEntry) {
-        if entry.timestamp >= companionSessionStartedAt { conversationSourceRevision &+= 1 }
+        let inSession = entry.timestamp >= companionSessionStartedAt
+        if inSession {
+            conversationSourceRevision &+= 1
+            sessionSourceCharacters += entry.originalText.count
+        }
         captionHistory.append(entry)
         if historyStore != nil {
             captionArchiveSessions[entry.id] = (companionSessionID, companionSessionStartedAt)
@@ -1977,7 +2068,10 @@ final class CaptionViewModel {
             recentCaptions.removeFirst()
         }
         scheduleCleanup()
-        if entry.timestamp >= companionSessionStartedAt { requestConversationSummary(automatically: true) }
+        if inSession {
+            if isRecording { updateMindMapBackground() }
+            requestConversationSummary(automatically: true)
+        }
     }
 
     private func updateCaption(
@@ -1997,6 +2091,7 @@ final class CaptionViewModel {
         let sourceChanged = updated.originalText != previous.originalText && updated.timestamp >= companionSessionStartedAt
         if sourceChanged {
             conversationSourceRevision &+= 1
+            sessionSourceCharacters += updated.originalText.count - previous.originalText.count
         }
         if let historyIndex = captionHistory.firstIndex(where: { $0.id == id }) {
             captionHistory[historyIndex] = updated

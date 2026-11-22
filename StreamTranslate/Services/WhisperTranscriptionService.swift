@@ -90,6 +90,10 @@ final class WhisperTranscriptionService: @unchecked Sendable {
         var options = pass == .preview
             ? Self.previewDecodingOptions
             : Self.decodingOptions
+        // Speech produces at most a few tokens per second. On music or crowd
+        // noise Whisper can instead loop to its 224-token limit, and the serial
+        // pipeline then falls tens of seconds behind live audio.
+        options.sampleLength = Self.sampleLength(forSampleCount: samples.count, limit: options.sampleLength)
         if let languageHint {
             options.language = languageHint.rawValue
             options.detectLanguage = false
@@ -139,6 +143,7 @@ final class WhisperTranscriptionService: @unchecked Sendable {
             return nil
         }
         guard !TranscriptionTextPolicy.isNonSpeechOnly(text) else { return nil }
+        guard !TranscriptionTextPolicy.isKnownHallucination(text) else { return nil }
 
         let reportedLanguage = results.first?.language ?? ""
         let language = languageHint ?? SpokenLanguage.resolve(
@@ -180,6 +185,10 @@ final class WhisperTranscriptionService: @unchecked Sendable {
             averageLogProbability: averageLogProbability,
             noSpeechProbability: noSpeechProbability
         )
+    }
+
+    static func sampleLength(forSampleCount count: Int, limit: Int) -> Int {
+        min(limit, 24 + Int(Double(count) / 16_000 * 10))
     }
 
     static var decodingOptions: DecodingOptions {

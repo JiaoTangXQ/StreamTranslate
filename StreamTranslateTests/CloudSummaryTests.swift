@@ -19,7 +19,7 @@ private func cloudValues() -> [String: String] {
     """)
     let config = SummaryCloudConfiguration(values: values)
     #expect(config?.baseURL.absoluteString == "https://summary.example/v1")
-    #expect(config?.maxTokens == 2048)
+    #expect(config?.maxTokens == 4096)
     var invalid = values; invalid["OPENAI_BASE_URL"] = "http://summary.example/v1"
     #expect(SummaryCloudConfiguration(values: invalid) == nil)
     invalid["CHAT_COMPLETIONS_INSECURE_TLS"] = "true"
@@ -59,13 +59,16 @@ private func cloudValues() -> [String: String] {
     #expect(legacy?.apiKey == "test-summary-key")
 }
 
+private let sampleRequest = MindMapRequest(map: "[]", previousTail: "", newText: "new source",
+    limits: MindMapLimits.forSession(minutes: 1, local: false), sessionMinutes: 1)
+
 @MainActor private final class FailoverSummaryStub: ConversationSummaryProviding {
-    var prepared = 0, requests: [(String, String)] = []
+    var prepared = 0, requests: [MindMapRequest] = []
     var cancelled = false, fails = false, delay: Duration = .zero
     var output = "local-output"
     func prepare() async throws { prepared += 1 }
-    func summarize(_ text: String, previous: String, onUpdate: @escaping @MainActor (String) -> Void) async throws -> String {
-        requests.append((text, previous)); onUpdate(output)
+    func summarize(_ request: MindMapRequest, onUpdate: @escaping @MainActor (String) -> Void) async throws -> String {
+        requests.append(request); onUpdate(output)
         if delay > .zero { try? await Task.sleep(for: delay) }
         if fails { throw CloudSummaryError.http(429) }
         return output
@@ -79,9 +82,10 @@ private func cloudValues() -> [String: String] {
     let service = AutomaticSummaryService(makeCloud: { remote }, makeLocal: { local })
     try await service.prepare()
     #expect(local.prepared == 0)
-    #expect(try await service.summarize("new text", previous: "index") == "cloud-output")
+    #expect(try await service.summarize(sampleRequest) == "cloud-output")
     #expect(local.prepared == 0 && local.requests.isEmpty)
     #expect(!service.usesLocalModel)
+    #expect(service.inputBudget == CloudSummaryService.inputBudget)
     service.cancel()
     #expect(remote.cancelled)
 }
@@ -91,23 +95,36 @@ private func cloudValues() -> [String: String] {
     remote.fails = true
     let service = AutomaticSummaryService(makeCloud: { remote }, makeLocal: { local })
     var updates: [String] = []
-    let output = try await service.summarize("[1] new source\n", previous: "T1|discussion|topic", onUpdate: { updates.append($0) })
+    let output = try await service.summarize(sampleRequest, onUpdate: { updates.append($0) })
     #expect(output == "local-output")
-    #expect(local.requests.first?.0 == remote.requests.first?.0)
-    #expect(local.requests.first?.1 == remote.requests.first?.1)
+    #expect(local.requests.first == remote.requests.first)
     #expect(updates.contains(""))
     #expect(service.backendDescription.contains("云端不可用"))
-    #expect(try await service.summarize("second source", previous: "index") == "local-output")
+    #expect(service.usesLocalModel)
+    #expect(service.inputBudget == LocalSummaryService.inputBudget)
+    #expect(try await service.summarize(sampleRequest) == "local-output")
     #expect(remote.requests.count == 1 && local.prepared == 1 && local.requests.count == 2)
     service.cancel()
     #expect(local.cancelled && remote.cancelled)
 }
 
-@Test @MainActor func malformedCloudPatchFallsBackBeforeCommittingAnyResult() async throws {
+@Test @MainActor func cloudFailureWithACloudSizedBatchAsksForALocalSizedRetry() async throws {
+    let remote = FailoverSummaryStub(), local = FailoverSummaryStub()
+    remote.fails = true
+    let service = AutomaticSummaryService(makeCloud: { remote }, makeLocal: { local })
+    let large = MindMapRequest(map: "[]", previousTail: "", newText: String(repeating: "x", count: 3_000),
+        limits: MindMapLimits.forSession(minutes: 1, local: false), sessionMinutes: 1)
+    do { _ = try await service.summarize(large); Issue.record("Oversized local fallback was attempted") }
+    catch SummaryError.retryWithLocalBudget { }
+    #expect(local.requests.isEmpty)
+    #expect(service.inputBudget == LocalSummaryService.inputBudget)
+}
+
+@Test @MainActor func malformedCloudRevisionFallsBackBeforeCommittingAnyResult() async throws {
     let remote = FailoverSummaryStub(), local = FailoverSummaryStub()
     remote.output = "bad-patch"
     let service = AutomaticSummaryService(makeCloud: { remote }, makeLocal: { local })
-    let output = try await service.summarize("new source", previous: "index", validating: { value in
+    let output = try await service.summarize(sampleRequest, validating: { value in
         if value == "bad-patch" { throw SummaryError.invalidResult }
     }, onUpdate: { _ in })
     #expect(output == "local-output")
@@ -118,7 +135,7 @@ private func cloudValues() -> [String: String] {
     let remote = FailoverSummaryStub(), local = FailoverSummaryStub()
     remote.delay = .milliseconds(60)
     let service = AutomaticSummaryService(makeCloud: { remote }, makeLocal: { local })
-    let request = Task { try await service.summarize("source", previous: "") }
+    let request = Task { try await service.summarize(sampleRequest) }
     for _ in 0..<100 {
         if !remote.requests.isEmpty { break }
         try await Task.sleep(for: .milliseconds(1))
@@ -133,7 +150,7 @@ private func cloudValues() -> [String: String] {
     let local = FailoverSummaryStub()
     let service = AutomaticSummaryService(makeCloud: nil, makeLocal: { local })
     try await service.prepare()
-    #expect(try await service.summarize("source", previous: "") == "local-output")
+    #expect(try await service.summarize(sampleRequest) == "local-output")
     #expect(local.prepared == 1)
     #expect(service.backendDescription.contains("仅在本机"))
     service.cancel()
@@ -165,12 +182,7 @@ private final class SummaryWireURLProtocol: URLProtocol, @unchecked Sendable {
                                        headerFields: ["Content-Type": "text/event-stream"])!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         if status == 200 {
-            let patch: String
-            if request.url!.host!.hasPrefix("dedup-") {
-                patch = number == 1 ? #"{"additions":[{"topic":"T1","kind":"discussion","title":"编程AI","branch":"B1","text":"缺少代码数据就无法训练","detail":"","match":"","sources":[1]}]}"# : #"{"duplicates":[{"index":1,"match":"P1"}]}"#
-            } else {
-                patch = #"{"additions":[{"topic":"new:1","kind":"discussion","title":"测试","branch":"要点","text":"中文事实。","sources":[1]}]}"#
-            }
+            let patch = #"{"topics":[{"id":"","kind":"discussion","title":"测试","summary":"","branches":[{"title":"内容","points":[{"text":"中文事实。","detail":""}]}]}],"remove":[]}"#
             let frames: [[String: Any]] = [
                 ["choices": [["delta": ["content": patch], "finish_reason": NSNull()]]],
                 ["choices": [["delta": [:], "finish_reason": "stop"]]]
@@ -201,7 +213,7 @@ private final class SummaryWireURLProtocol: URLProtocol, @unchecked Sendable {
     settings.protocolClasses = [SummaryWireURLProtocol.self]
     let service = CloudSummaryService(configuration: SummaryCloudConfiguration(values: values)!, session: URLSession(configuration: settings))
     defer { service.cancel() }
-    _ = try await service.summarize("[1] Source fact\n", previous: "")
+    _ = try await service.summarize(sampleRequest)
     let sent = try #require(SummaryWireRequests.shared.get(host))
     let config = try #require(SummaryCloudConfiguration(values: values))
     let body = try CloudSummaryService.requestBody(configuration: config, messages: [], maxTokens: nil)
@@ -209,37 +221,6 @@ private final class SummaryWireURLProtocol: URLProtocol, @unchecked Sendable {
     #expect(object["model"] as? String == "gpt-4o-mini")
     #expect(object["thinking"] == nil)
     #expect(sent.value(forHTTPHeaderField: "Authorization") == "Bearer openai-summary-key")
-}
-
-@Test @MainActor func cloudReviewsParaphrasesWithoutRewritingContentOrStartingLocalModel() async throws {
-    var values = cloudValues()
-    let host = "dedup-" + UUID().uuidString.lowercased() + ".example"
-    values["OPENAI_BASE_URL"] = "https://" + host + "/v1"
-    let settings = URLSessionConfiguration.ephemeral
-    settings.protocolClasses = [SummaryWireURLProtocol.self]
-    let service = CloudSummaryService(configuration: SummaryCloudConfiguration(values: values)!, session: URLSession(configuration: settings))
-    defer { service.cancel() }
-    let batch = SummaryBatch(records: [.init(sourceID: UUID(), text: "Coding AI needs code data.\n")])
-    let map = try ConversationMindMap().adding(#"{"topic":"new:1","kind":"discussion","title":"编程AI","branch":"训练数据","text":"足量代码数据是训练前提","sources":[1]}"#, batch: batch)
-    let repeated = SummaryBatch(records: [.init(sourceID: UUID(), text: "Without code data, coding AI cannot be trained.\n")])
-    let output = try await service.summarize(repeated.input, previous: map.context())
-    let next = try map.adding(output, batch: repeated)
-    #expect(SummaryWireRequests.shared.count(host) == 2)
-    #expect(next.topics[0].branches[0].points.count == 1)
-    #expect(next.topics[0].branches[0].points[0].id == map.topics[0].branches[0].points[0].id)
-    #expect(next.topics[0].branches[0].points[0].sources.count == 2)
-    #expect(!service.usesLocalModel)
-}
-
-@Test @MainActor func duplicateReviewCannotRewriteOrReferenceOtherBranches() throws {
-    let output = #"{"additions":[{"topic":"T1","kind":"discussion","branch":"B1","text":"尚未确认的数据量","detail":"","match":"","sources":[1]}]}"#
-    let context = "T1|discussion|编程AI\n B1|训练数据\n  P1|{}\n B2|能力\n  P2|{}"
-    for review in [#"{"duplicates":[{"index":1,"match":"P2"}]}"#, #"{"duplicates":[{"index":2,"match":"P1"}]}"#, #"{"duplicates":[{"index":1,"match":"P1","text":"擅自改写"}]}"#, #"{"duplicates":[{"index":1,"match":"P1"},{"index":1,"match":"P1"}]}"#] {
-        #expect(throws: SummaryError.self) { try CloudSummaryService.applyingDuplicateReview(review, to: output, previous: context) }
-    }
-    let retained = try CloudSummaryService.applyingDuplicateReview(#"{"duplicates":[]}"#, to: output, previous: context)
-    #expect(retained.contains("尚未确认的数据量"))
-    #expect(try CloudSummaryService.duplicateReviewMessages(output, source: "new", previous: "T1|discussion|编程AI") == nil)
 }
 
 @Test @MainActor func cloudSummaryHTTPUsesConfiguredEndpointAndDecodesSplitUnicodeSSE() async throws {
@@ -250,7 +231,7 @@ private final class SummaryWireURLProtocol: URLProtocol, @unchecked Sendable {
     settings.protocolClasses = [SummaryWireURLProtocol.self]
     let service = CloudSummaryService(configuration: SummaryCloudConfiguration(values: values)!, session: URLSession(configuration: settings))
     defer { service.cancel() }
-    let output = try await service.summarize("[1] Source fact\n", previous: "")
+    let output = try await service.summarize(sampleRequest)
     #expect(output.contains("中文事实。"))
     #expect(!output.contains("�"))
     let sent = try #require(SummaryWireRequests.shared.get(host))
@@ -267,7 +248,7 @@ private final class SummaryWireURLProtocol: URLProtocol, @unchecked Sendable {
     settings.protocolClasses = [SummaryWireURLProtocol.self]
     let service = CloudSummaryService(configuration: SummaryCloudConfiguration(values: values)!, session: URLSession(configuration: settings))
     defer { service.cancel() }
-    do { _ = try await service.summarize("[1] Source\n", previous: ""); Issue.record("Accepted HTTP 401") }
+    do { _ = try await service.summarize(sampleRequest); Issue.record("Accepted HTTP 401") }
     catch CloudSummaryError.http(let status) { #expect(status == 401) }
 }
 
@@ -298,14 +279,13 @@ private final class SummaryWireURLProtocol: URLProtocol, @unchecked Sendable {
     #expect(configuration?.model == "deepseek-v4.1-flash")
 }
 
-@Test @MainActor func harmlessCloudFormatMarkerIsRemovedWithoutDiscardingInvalidNodes() throws {
-    let response = #"{"type":"json_object","additions":[{"topic":"new:1","kind":"discussion","title":"记忆","branch":"要点","text":"海马体参与记忆。","sources":[1]}]}"#
+@Test @MainActor func harmlessCloudFormatMarkerIsRemovedWithoutDiscardingTheRevision() throws {
+    let response = #"{"type":"json_object","topics":[{"id":"","kind":"discussion","title":"记忆","summary":"","branches":[{"title":"机制","points":[{"text":"海马体参与记忆。","detail":""}]}]}]}"#
     let normalized = try CloudSummaryService.normalizedEnvelope(response)
-    let batch = SummaryBatch(records: [.init(sourceID: UUID(), text: "海马体参与记忆。\n")])
-    let map = try ConversationMindMap().adding(normalized, batch: batch)
+    let map = try ConversationMindMap().applying(normalized, limits: MindMapLimits.forSession(minutes: 1, local: false)).map
     #expect(map.topics[0].branches[0].points[0].text == "海马体参与记忆。")
-    let invalid = try CloudSummaryService.normalizedEnvelope(response.replacingOccurrences(of: "[1]", with: "[2]"))
-    #expect(throws: SummaryError.self) { try ConversationMindMap().adding(invalid, batch: batch) }
-    #expect(throws: SummaryError.self) { try CloudSummaryService.normalizedEnvelope(#"{"type":"other","additions":[]}"#) }
-    #expect(throws: SummaryError.self) { try CloudSummaryService.normalizedEnvelope(#"{"additions":[],"other":[]}"#) }
+    #expect(try CloudSummaryService.normalizedEnvelope("```json\n" + response + "\n```").contains("海马体"))
+    #expect(throws: SummaryError.self) { try CloudSummaryService.normalizedEnvelope(#"{"type":"other","topics":[]}"#) }
+    #expect(throws: SummaryError.self) { try CloudSummaryService.normalizedEnvelope(#"{"topics":[],"remove":[],"other":[]}"#) }
+    #expect(throws: (any Error).self) { try CloudSummaryService.normalizedEnvelope("not json") }
 }
